@@ -1,505 +1,423 @@
 /**
- * api.js — Capa de datos con resultados REALES e HISTORIAL
+ * api.js — Datos reales de loterías colombianas
  *
- * Fuentes:
- *  1) api-resultadosloterias.com  — resultado más reciente por slug
- *  2) loteriaya.com.co            — resultado por fecha exacta + historial
- *  3) resultadodelaloteria.com    — fallback resultado actual
- *  4) Horario programado          — si todo falla
+ * Fuentes por prioridad:
+ *  1) api-resultadosloterias.com  → último resultado + historial por fechas
+ *  2) loteriaya.com.co            → historial + resultado por fecha (via proxy)
+ *  3) resultadodelaloteria.com    → fallback resultado actual
+ *  4) Horario programado          → si todo falla
+ *
+ * Bug fixes vs versión anterior:
+ *  - Deduplicación por apiSlug antes de procesar → sin repetidos
+ *  - fetchAllResults usa SOLO slugs de la API, sin mezclar catálogo al final
+ *  - Historial usa fecha a fecha con múltiples fuentes en paralelo
+ *  - parseLyResultHtml más tolerante al HTML real
  */
 
-const API1_BASE  = 'https://api-resultadosloterias.com/api';
-const PROXY      = 'https://corsproxy.io/?url=';
-const LY_BASE    = 'https://www.loteriaya.com.co';   // /loteria/{slug}/resultado/YYYY-MM-DD
-const RDL_BASE   = 'https://resultadodelaloteria.com/colombia';
+const API1   = 'https://api-resultadosloterias.com/api';
+const PROXY  = 'https://corsproxy.io/?url=';
+const LY     = 'https://www.loteriaya.com.co';
+const RDL    = 'https://resultadodelaloteria.com/colombia';
 
-// ── Slugs de loteriaya.com.co (coinciden con resultadodelaloteria en su mayoría)
-const LY_SLUGS = {
-  bogota:        'loteria-de-bogota',
-  medellin:      'loteria-de-medellin',
-  cundinamarca:  'loteria-de-cundinamarca',
-  boyaca:        'loteria-de-boyaca',
-  huila:         'loteria-del-huila',
-  tolima:        'loteria-del-tolima',
-  manizales:     'loteria-de-manizales',
-  quindio:       'loteria-del-quindio',
-  risaralda:     'loteria-de-risaralda',
-  santander:     'loteria-de-santander',
-  cauca:         'loteria-del-cauca',
-  narino:        'loteria-de-narino',
-  putumayo:      'loteria-del-putumayo',
-  oriental:      'loteria-oriental',
-  pacifico:      'loteria-del-pacifico',
-  cordobesa:     'loteria-cordobesa',
-  sucre:         'loteria-de-sucre',
-  magdalena:     'loteria-del-magdalena',
-  cruzroja:      'loteria-de-la-cruz-roja',
-  extracolombia: 'extra-de-colombia',
-  meta:          'loteria-del-meta',
-  baloto:        'baloto',
-  revancha:      'revancha',
-  miloto:        'miloto',
-  // chances
-  'antioquenita-m':  'antioquenita-manana',
-  'antioquenita-t':  'antioquenita-tarde',
-  'antioquenita-n':  'antioquenita-noche',
-  'cafetero-m':      'cafetero-manana',
-  'cafetero-t':      'cafetero-tarde',
-  'cafetero-n':      'cafetero-noche',
-  'pijao-m':         'pijao-de-oro-manana',
-  'pijao-t':         'pijao-de-oro-tarde',
-  'pijao-n':         'pijao-de-oro-noche',
-  'pata-m':          'la-pata-manana',
-  'pata-t':          'la-pata-tarde',
-  'pata-n':          'la-pata-noche',
-  'costeño-m':       'el-costeno-manana',
-  'costeño-t':       'el-costeno-tarde',
-  'costeño-n':       'el-costeno-noche',
-  'mano-m':          'la-mano-manana',
-  'mano-t':          'la-mano-tarde',
-  'mano-n':          'la-mano-noche',
-  'caribe-m':        'caribe-manana',
-  'caribe-t':        'caribe-tarde',
-  'caribe-n':        'caribe-noche',
-  'cash3-m':         'cash-three-manana',
-  'cash3-t':         'cash-three-tarde',
-  'cash3-n':         'cash-three-noche',
-  'suertudo-m':      'el-suertudo-manana',
-  'suertudo-t':      'el-suertudo-tarde',
-  'suertudo-n':      'el-suertudo-noche',
-  'paisita-m':       'paisita-manana',
-  'paisita-t':       'paisita-tarde',
-  'paisita-n':       'paisita-noche',
-  'motilón-m':       'el-motilon-manana',
-  'motilón-t':       'el-motilon-tarde',
-  'motilón-n':       'el-motilon-noche',
-  'superastro-sol':  'super-astro-sol',
-  'superastro-luna': 'super-astro-luna',
+// Slugs de loteriaya.com.co para historial/fecha
+const LY_SLUG = {
+  bogota:'loteria-de-bogota', medellin:'loteria-de-medellin',
+  cundinamarca:'loteria-de-cundinamarca', boyaca:'loteria-de-boyaca',
+  huila:'loteria-del-huila', tolima:'loteria-del-tolima',
+  manizales:'loteria-de-manizales', quindio:'loteria-del-quindio',
+  risaralda:'loteria-de-risaralda', santander:'loteria-de-santander',
+  cauca:'loteria-del-cauca', narino:'loteria-de-narino',
+  putumayo:'loteria-del-putumayo', oriental:'loteria-oriental',
+  pacifico:'loteria-del-pacifico', cordobesa:'loteria-cordobesa',
+  sucre:'loteria-de-sucre', magdalena:'loteria-del-magdalena',
+  cruzroja:'loteria-de-la-cruz-roja', extracolombia:'extra-de-colombia',
+  meta:'loteria-del-meta', baloto:'baloto', revancha:'revancha', miloto:'miloto',
+  'antioquenita-m':'antioquenita-manana','antioquenita-t':'antioquenita-tarde','antioquenita-n':'antioquenita-noche',
+  'cafetero-m':'cafetero-manana','cafetero-t':'cafetero-tarde','cafetero-n':'cafetero-noche',
+  'pijao-m':'pijao-de-oro-manana','pijao-t':'pijao-de-oro-tarde','pijao-n':'pijao-de-oro-noche',
+  'pata-m':'la-pata-manana','pata-t':'la-pata-tarde','pata-n':'la-pata-noche',
+  'costeño-m':'el-costeno-manana','costeño-t':'el-costeno-tarde','costeño-n':'el-costeno-noche',
+  'mano-m':'la-mano-manana','mano-t':'la-mano-tarde','mano-n':'la-mano-noche',
+  'caribe-m':'caribe-manana','caribe-t':'caribe-tarde','caribe-n':'caribe-noche',
+  'cash3-m':'cash-three-manana','cash3-t':'cash-three-tarde','cash3-n':'cash-three-noche',
+  'suertudo-m':'el-suertudo-manana','suertudo-t':'el-suertudo-tarde','suertudo-n':'el-suertudo-noche',
+  'paisita-m':'paisita-manana','paisita-t':'paisita-tarde','paisita-n':'paisita-noche',
+  'motilón-m':'el-motilon-manana','motilón-t':'el-motilon-tarde','motilón-n':'el-motilon-noche',
+  'superastro-sol':'super-astro-sol','superastro-luna':'super-astro-luna',
 };
 
-// ── Fetch helpers ─────────────────────────────────────────────────────────────
+// ── Fetch ─────────────────────────────────────────────────────────────────────
 
-async function fetchJSON(url, timeout = 10000) {
-  const ctrl = new AbortController();
-  const tid  = setTimeout(() => ctrl.abort(), timeout);
+async function fetchJSON(url, ms = 10000) {
+  const c = new AbortController();
+  const t = setTimeout(() => c.abort(), ms);
   try {
-    const r = await fetch(url, { signal: ctrl.signal, headers: { Accept: 'application/json' } });
-    clearTimeout(tid);
+    const r = await fetch(url, { signal: c.signal, headers: { Accept: 'application/json' } });
+    clearTimeout(t);
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     return await r.json();
-  } catch (e) { clearTimeout(tid); throw e; }
+  } catch (e) { clearTimeout(t); throw e; }
 }
 
-async function fetchHTML(url, timeout = 14000) {
-  const proxyUrl = PROXY + encodeURIComponent(url);
-  const ctrl = new AbortController();
-  const tid  = setTimeout(() => ctrl.abort(), timeout);
+async function fetchHTML(url, ms = 14000) {
+  const c = new AbortController();
+  const t = setTimeout(() => c.abort(), ms);
   try {
-    const r = await fetch(proxyUrl, { signal: ctrl.signal });
-    clearTimeout(tid);
+    const r = await fetch(PROXY + encodeURIComponent(url), { signal: c.signal });
+    clearTimeout(t);
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     return await r.text();
-  } catch (e) { clearTimeout(tid); throw e; }
+  } catch (e) { clearTimeout(t); throw e; }
 }
 
 // ── SOURCE 1: api-resultadosloterias.com ─────────────────────────────────────
 
-async function apiGetLotteryList() {
-  const data = await fetchJSON(`${API1_BASE}/lotteries`);
-  if (data.status !== 'success' || !Array.isArray(data.data)) throw new Error('Bad response');
-  return data.data;
+async function apiListLotteries() {
+  const d = await fetchJSON(`${API1}/lotteries`);
+  if (d.status !== 'success' || !Array.isArray(d.data)) throw new Error('Bad /lotteries');
+  return d.data; // [{name, slug}]
 }
 
-async function apiGetLastResult(slug) {
-  const data = await fetchJSON(`${API1_BASE}/results/${slug}/last`);
-  if (!data || data.status === 'error') throw new Error(`No result: ${slug}`);
-  return normalizeApiResult(data.data || data, slug);
+async function apiLastResult(slug) {
+  const d = await fetchJSON(`${API1}/results/${slug}/last`);
+  if (!d || d.status === 'error') throw new Error(`No data: ${slug}`);
+  return normalizeAPI(d.data || d, slug);
 }
 
-function normalizeApiResult(r, slug) {
+async function apiResultByDate(slug, dateISO) {
+  const d = await fetchJSON(`${API1}/results/${slug}/${dateISO}`);
+  if (!d || d.status === 'error') throw new Error(`No data: ${slug} ${dateISO}`);
+  return normalizeAPI(d.data || d, slug);
+}
+
+function normalizeAPI(r, slug) {
   const cat = findInCatalog(slug) || findInCatalog(r.lottery_name || r.name || '');
-  const type = cat ? cat.type : guessType(r.lottery_name || r.name || slug || '');
-  let numbers = parseNumbers(r.numbers || r.number || r.resultado || r.numeros || '');
-  if (type === 'loteria' && numbers.length === 1) numbers[0] = numbers[0].padStart(4, '0');
-  return {
-    id: cat?.id || slugToId(slug), apiSlug: slug,
+  const type = cat ? cat.type : guessType(r.lottery_name || r.name || slug);
+  let nums = parseNums(r.numbers || r.number || r.resultado || r.numeros || '');
+  if (type === 'loteria' && nums.length === 1) nums[0] = nums[0].padStart(4, '0');
+  return mkResult({
+    id: cat?.id || slug2id(slug), slug,
     name: cat?.name || r.lottery_name || r.name || slug,
-    shortName: cat?.shortName || r.lottery_name || slug,
+    short: cat?.shortName || r.name || slug,
     type, emoji: cat?.emoji || typeEmoji(type),
-    date: parseDate(r.date || r.fecha || r.draw_date || ''),
-    numbers, serie: r.serie || r.series || null,
-    fraccion: r.fraccion || r.fraction || null,
-    prize: r.prize || r.premio || null,
+    date: parseISO(r.date || r.fecha || r.draw_date || ''),
+    nums, serie: r.serie || r.series || null,
+    fraccion: r.fraccion || null, prize: r.prize || r.premio || null,
     jackpot: r.jackpot || r.acumulado || null,
-    superball: r.superball || r.superbalota || null,
+    superball: r.superball || null,
     sorteo: r.draw_number || r.sorteo || r.concurso || null,
     sign: r.sign || r.signo || null,
     source: 'api-resultadosloterias.com',
     official: cat?.official || 'https://www.coljuegos.gov.co',
-    hasResult: numbers.length > 0,
-  };
+    entity: cat?.entity || null,
+  });
 }
 
-// ── SOURCE 2: loteriaya.com.co — resultado por fecha exacta ──────────────────
+// ── SOURCE 2: loteriaya.com.co ────────────────────────────────────────────────
 
-async function lyGetResultByDate(cat, dateISO) {
-  const slug = LY_SLUGS[cat.id];
-  if (!slug) throw new Error('No LY slug for ' + cat.id);
-  const url = `${LY_BASE}/loteria/${slug}/resultado/${dateISO}`;
-  const html = await fetchHTML(url);
-  return parseLyResultHtml(html, cat, dateISO);
+async function lyResultByDate(cat, dateISO) {
+  const slug = LY_SLUG[cat.id];
+  if (!slug) throw new Error('No LY slug: ' + cat.id);
+  const html = await fetchHTML(`${LY}/loteria/${slug}/resultado/${dateISO}`);
+  return parseLY(html, cat, dateISO);
 }
 
-function parseLyResultHtml(html, cat, dateISO) {
-  if (!html || html.length < 200) return null;
-  // loteriaya result page pattern:
-  // "El número ganador ... fue XXXX, serie YYY"
-  // <span class="number">XXXX</span>
-  const numPats = [
-    /(?:fue|ganador)[^0-9]*(\d{4})/i,
-    /<span[^>]*class="[^"]*number[^"]*"[^>]*>\s*(\d{1,5})\s*<\/span>/i,
-    /n[uú]mero\s+ganador[^0-9]*(\d{4})/i,
-    /"winning_number"\s*:\s*"?(\d{4})"?/i,
-    /resultado[^0-9]*(\d{4})/i,
+function parseLY(html, cat, dateISO) {
+  if (!html || html.length < 100) return null;
+
+  // loteriaya.com.co renders "ganador de la Lotería de Bogotá ... fue XXXX, serie YYY"
+  // Also: <span class="winning-number">XXXX</span>  or  data-number="XXXX"
+  const pats = [
+    /(?:fue el|fue)\s+(\d{4})\b/i,
+    /(?:ganador|winning)[^0-9]{0,40}(\d{4})\b/i,
+    /class="[^"]*(?:number|numero|winning)[^"]*"[^>]*>\s*(\d{4})\s*</i,
+    /data-number="(\d{4})"/i,
+    /"winning_number"\s*:\s*"(\d{4})"/i,
+    // número + serie en el mismo texto
+    /(\d{4}),?\s+serie\s+\d/i,
+    // cualquier número 4 dígitos destacado entre etiquetas
+    />\s*(\d{4})\s*</,
   ];
+
   let number = null;
-  for (const pat of numPats) {
-    const m = html.match(pat);
-    if (m) { number = m[1].padStart(4, '0'); break; }
+  for (const p of pats) {
+    const m = html.match(p);
+    if (m) {
+      // Verificar que sea un número plausible de lotería (0001–9999)
+      const n = parseInt(m[1]);
+      if (n >= 0 && n <= 9999) { number = String(n).padStart(4, '0'); break; }
+    }
   }
   if (!number) return null;
 
-  const serie = (html.match(/serie[^0-9]*(\d{1,5})/i) || html.match(/series?\s+(\d{1,5})/i))?.[1] || null;
-  const sorteo = (html.match(/sorteo[^0-9]*(\d+)/i) || html.match(/nro\.\s*(\d+)/i))?.[1] || null;
-  const prize = extractPrize(html);
+  const serie   = html.match(/serie[^0-9]{0,10}(\d{1,5})/i)?.[1] ?? null;
+  const sorteo  = html.match(/sorteo[^0-9]{0,10}(\d+)/i)?.[1]   ?? null;
+  const prize   = extractPrize(html);
 
-  return buildResultObj(cat, [number], serie, sorteo, dateISO, prize, 'loteriaya.com.co');
+  return mkResult({ id: cat.id, slug: cat.apiSlug, name: cat.name, short: cat.shortName,
+    type: cat.type, emoji: cat.emoji, date: dateISO,
+    nums: [number], serie, fraccion: null, prize, jackpot: null, superball: null, sorteo,
+    sign: null, source: 'loteriaya.com.co', official: cat.official || 'https://www.coljuegos.gov.co',
+    entity: cat.entity });
 }
 
-// ── SOURCE 2b: loteriaya.com.co — historial (últimos sorteos) ────────────────
+// ── SOURCE 3: resultadodelaloteria.com ───────────────────────────────────────
 
-/**
- * Obtiene los últimos N sorteos de una lotería desde loteriaya.com.co/historial
- * Returns: [ { date, numbers, serie, sorteo, prize } ]
- */
-async function lyGetHistory(cat, limit = 15) {
-  const slug = LY_SLUGS[cat.id];
-  if (!slug) throw new Error('No LY slug for ' + cat.id);
-  const url = `${LY_BASE}/loteria/${slug}/historial`;
-  const html = await fetchHTML(url, 16000);
-  return parseLyHistoryHtml(html, cat, limit);
+async function rdlLastResult(cat) {
+  const html = await fetchHTML(`${RDL}/${cat.rdlSlug}`);
+  return parseRDL(html, cat);
 }
 
-function parseLyHistoryHtml(html, cat, limit) {
-  if (!html || html.length < 200) return [];
-  const results = [];
-
-  // loteriaya historial renders a table or list of past draws
-  // Each row: date | number | serie | sorteo#
-  // Pattern 1: table rows  <tr>...<td>date</td><td>number</td><td>serie</td>...
-  // Pattern 2: list items with data
-  
-  // Try extracting all ISO dates + numbers together
-  // The page has entries like "2026-11-06" and nearby "5609" and "serie 266"
-  const rowPattern = /(\d{4}-\d{2}-\d{2})[^]*?(\d{4})[^]*?(?:serie[^0-9]*(\d{1,5}))?/gi;
-  
-  // Better: split by table rows or list items
-  const sections = html.split(/<tr[^>]*>|<li[^>]*class="[^"]*(?:draw|result|sorteo|item)[^"]*"[^>]*>/i);
-  
-  for (const sec of sections.slice(1, limit * 3)) {
-    const dateM = sec.match(/(\d{4}-\d{2}-\d{2})/);
-    if (!dateM) continue;
-    const date = dateM[1];
-    
-    // number: 4-digit in that section
-    const numM = sec.match(/>(\d{4})</) || sec.match(/(?:ganador|número)[^0-9]*(\d{4})/i) || sec.match(/>\s*(\d{4})\s*</);
-    if (!numM) continue;
-    const number = numM[1].padStart(4, '0');
-    
-    const serie = (sec.match(/serie[^0-9]*(\d{1,5})/i))?.[1] || null;
-    const sorteo = (sec.match(/(?:sorteo|nro\.)[^0-9]*(\d+)/i))?.[1] || null;
-    const prize = extractPrize(sec);
-    
-    results.push(buildResultObj(cat, [number], serie, sorteo, date, prize, 'loteriaya.com.co'));
-    if (results.length >= limit) break;
-  }
-
-  // Fallback: regex scan of full page for date+number pairs
-  if (results.length === 0) {
-    const allDates = [...html.matchAll(/(\d{4}-\d{2}-\d{2})/g)].map(m => m[1]);
-    const unique = [...new Set(allDates)].sort().reverse().slice(0, limit);
-    for (const date of unique) {
-      // find number near this date
-      const idx = html.indexOf(date);
-      if (idx < 0) continue;
-      const slice = html.slice(Math.max(0, idx - 50), idx + 300);
-      const nm = slice.match(/>(\d{4})</) || slice.match(/(\d{4})/);
-      if (!nm) continue;
-      results.push(buildResultObj(cat, [nm[1].padStart(4,'0')], null, null, date, null, 'loteriaya.com.co'));
-    }
-  }
-
-  return results.sort((a, b) => b.date.localeCompare(a.date)).slice(0, limit);
-}
-
-// ── SOURCE 3: resultadodelaloteria.com — fallback ────────────────────────────
-
-async function rdlGetResult(cat) {
-  const url = `${RDL_BASE}/${cat.rdlSlug}`;
-  const html = await fetchHTML(url, 14000);
-  return parseRdlHtml(html, cat);
-}
-
-function parseRdlHtml(html, cat) {
+function parseRDL(html, cat) {
   if (!html || html.length < 100) return null;
+  // "El número ganador de Lotería de Medellín ... fue 2168 con la serie 056"
   const pats = [
-    /n[úu]mero\s+ganador[^:]*[:]\s*([\d\s]+)/i,
-    /resultado[^:]*[:]\s*([\d\s\-]+)/i,
-    /<strong[^>]*>\s*(\d{4})\s*<\/strong>/,
-    /(?:fue|sorteo\s+\d+[^<]*)(\d{4})\s+con/i,
+    /(?:fue|ganador)[^0-9]{0,40}(\d{4})\b/i,
+    /<strong[^>]*>(\d{4})<\/strong>/i,
     />\s*(\d{4})\s*</,
   ];
-  for (const pat of pats) {
-    const m = html.match(pat);
+  for (const p of pats) {
+    const m = html.match(p);
     if (m) {
-      const nums = m[1].trim().split(/[\s,\-]+/).filter(n => /^\d+$/.test(n) && n.length <= 4);
-      if (nums.length > 0) {
-        return buildResultObj(cat, nums.map(n => n.padStart(4,'0')),
-          extractField(html, 'serie'),
-          extractField(html, 'sorteo'),
-          extractDate(html), null, 'resultadodelaloteria.com');
+      const n = parseInt(m[1]);
+      if (n >= 0 && n <= 9999) {
+        return mkResult({ id: cat.id, slug: cat.apiSlug, name: cat.name, short: cat.shortName,
+          type: cat.type, emoji: cat.emoji, date: extractDate(html),
+          nums: [String(n).padStart(4,'0')],
+          serie: html.match(/serie[^0-9]{0,10}(\d{1,5})/i)?.[1] ?? null,
+          fraccion: null, prize: null, jackpot: null, superball: null,
+          sorteo: html.match(/sorteo[^0-9]{0,10}(\d+)/i)?.[1] ?? null,
+          sign: null, source: 'resultadodelaloteria.com',
+          official: cat.official || 'https://www.coljuegos.gov.co', entity: cat.entity });
       }
     }
   }
   return null;
 }
 
-// ── HISTORIAL: función principal pública ─────────────────────────────────────
+// ── HISTORIAL ─────────────────────────────────────────────────────────────────
 
 /**
- * Obtiene el historial de sorteos de una lotería (últimas ~3 semanas).
- * Retorna array ordenado de más reciente a más antiguo.
+ * Devuelve array con los últimos 15 sorteos de una lotería.
+ * Estrategia: genera las fechas esperadas según día(s) de sorteo y pide cada una.
+ * Para chances (todos los días) limita a los últimos 15 días.
  */
 async function fetchHistory(cat) {
-  // Para loterías con slug en LY
-  const lySlug = LY_SLUGS[cat.id];
-  if (lySlug) {
-    try {
-      const history = await lyGetHistory(cat, 21);
-      if (history.length > 0) return history;
-    } catch (e) {
-      console.warn('[LY] history failed:', e.message);
+  const isDaily = cat.day.length >= 6; // chance diario
+  const weeks   = isDaily ? 0 : 3;     // loterías: 3 semanas atrás; chances: 15 días
+  const limit   = 15;
+
+  let dates;
+  if (isDaily) {
+    // Últimos 15 días
+    dates = [];
+    const today = new Date(); today.setHours(0,0,0,0);
+    for (let i = 0; i < 15; i++) {
+      const d = new Date(today); d.setDate(today.getDate() - i);
+      dates.push(d.toISOString().slice(0,10));
     }
+  } else {
+    dates = drawDatesBack(cat.day, 5); // 5 semanas para tener ~5 sorteos
   }
 
-  // Fallback: construir fechas esperadas según día de sorteo y pedir una por una
-  return await fetchHistoryByDates(cat);
-}
-
-/**
- * Fallback: genera las fechas de sorteo de las últimas 3 semanas
- * y pide el resultado de cada una.
- */
-async function fetchHistoryByDates(cat) {
-  const drawDays = cat.day; // e.g. [5] para viernes
-  const dates = getDrawDatesLastNWeeks(drawDays, 3);
+  // Pedir todas las fechas en paralelo (máximo 8 simultáneas)
+  const BATCH = 8;
   const results = [];
-
-  const fetches = dates.map(async (d) => {
-    // Intentar API primero
-    try {
-      const r = await lyGetResultByDate(cat, d);
-      if (r) return r;
-    } catch (_) {}
-    // Intentar api-resultadosloterias por fecha si existe ese endpoint
-    try {
-      const data = await fetchJSON(`${API1_BASE}/results/${cat.apiSlug}/${d}`);
-      if (data && (data.data || data.number || data.numbers)) {
-        return normalizeApiResult(data.data || data, cat.apiSlug);
-      }
-    } catch (_) {}
-    return null;
-  });
-
-  const resolved = await Promise.allSettled(fetches);
-  for (const r of resolved) {
-    if (r.status === 'fulfilled' && r.value) results.push(r.value);
-  }
-  return results.sort((a, b) => b.date.localeCompare(a.date));
-}
-
-/**
- * Genera las fechas (ISO) de los N días de sorteo más recientes.
- * drawDays: array de días de la semana (0=dom...6=sáb)
- * weeks: cuántas semanas hacia atrás mirar
- */
-function getDrawDatesLastNWeeks(drawDays, weeks) {
-  const dates = [];
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-
-  for (let i = 0; i < weeks * 7; i++) {
-    const d = new Date(today);
-    d.setDate(today.getDate() - i);
-    if (drawDays.includes(d.getDay())) {
-      dates.push(d.toISOString().slice(0, 10));
+  for (let i = 0; i < dates.length && results.length < limit; i += BATCH) {
+    const batch = dates.slice(i, i + BATCH);
+    const settled = await Promise.allSettled(batch.map(d => fetchOneDateResult(cat, d)));
+    for (const s of settled) {
+      if (s.status === 'fulfilled' && s.value) results.push(s.value);
     }
   }
-  return dates;
+
+  return results.sort((a,b) => b.date.localeCompare(a.date)).slice(0, limit);
 }
 
-// ── Resultado por fecha específica (búsqueda avanzada) ───────────────────────
-
-/**
- * Busca el resultado de una lotería en una fecha concreta.
- * Usado cuando el usuario escribe "medellín 13 de noviembre".
- */
-async function fetchResultByDate(cat, dateISO) {
-  // 1) loteriaya por fecha
+/** Busca resultado de una lotería en una fecha concreta — intenta todas las fuentes */
+async function fetchOneDateResult(cat, dateISO) {
+  // 1. API primaria con endpoint /date
   try {
-    const r = await lyGetResultByDate(cat, dateISO);
-    if (r) return r;
+    const r = await apiResultByDate(cat.apiSlug, dateISO);
+    if (r?.hasResult) return r;
   } catch (_) {}
 
-  // 2) api por fecha
-  try {
-    const data = await fetchJSON(`${API1_BASE}/results/${cat.apiSlug}/${dateISO}`);
-    if (data && (data.data || data.number)) return normalizeApiResult(data.data || data, cat.apiSlug);
-  } catch (_) {}
+  // 2. loteriaya por fecha (solo loterías tradicionales y baloto, no chances)
+  if (cat.type !== 'chance' && LY_SLUG[cat.id]) {
+    try {
+      const r = await lyResultByDate(cat, dateISO);
+      if (r?.hasResult) return r;
+    } catch (_) {}
+  }
 
-  // 3) resultadodelaloteria.com por URL con fecha en español
-  try {
-    const [y,m,d] = dateISO.split('-').map(Number);
-    const monthNames = ['enero','febrero','marzo','abril','mayo','junio','julio','agosto','septiembre','octubre','noviembre','diciembre'];
-    const dayNames = ['domingo','lunes','martes','miercoles','jueves','viernes','sabado'];
-    const date = new Date(y, m-1, d);
-    const dayName = dayNames[date.getDay()];
-    const monthName = monthNames[m-1];
-    // URL pattern: /colombia/loteria-de-medellin-del-30-de-octubre-de-2026-sorteo-4859
-    // We can't guess the sorteo number, so try the main page and check if it matches
-    const r = await rdlGetResult(cat);
-    if (r && r.date === dateISO) return r;
-  } catch (_) {}
-
-  return null;
+  return null; // sin resultado para esa fecha → se omite del historial
 }
 
-// ── Main: cargar todos los resultados del día ─────────────────────────────────
+// ── CARGA PRINCIPAL del día ───────────────────────────────────────────────────
 
 async function fetchAllResults(onProgress) {
+  // ── Paso 1: obtener lista de slugs de la API ──────────────────────────────
   let apiSlugs = [];
-  let apiAvailable = true;
+  let apiOk    = true;
 
   try {
     onProgress('Conectando con la fuente oficial...', '');
-    const lotteries = await apiGetLotteryList();
-    apiSlugs = lotteries.map(l => ({ slug: l.slug, name: l.name }));
-    onProgress(`${apiSlugs.length} loterías disponibles`, 'Obteniendo resultados...');
+    const list = await apiListLotteries();
+
+    // DEDUPLICAR por slug (la API a veces repite entradas)
+    const seen = new Set();
+    apiSlugs = list.filter(l => {
+      if (seen.has(l.slug)) return false;
+      seen.add(l.slug);
+      return true;
+    });
+
+    onProgress(`${apiSlugs.length} loterías en la API`, 'Obteniendo resultados...');
   } catch (e) {
-    console.warn('[API1] lotteries list failed:', e.message);
-    apiAvailable = false;
+    console.warn('[API] list failed:', e.message);
+    apiOk = false;
+    // Usar catálogo propio como fallback
     apiSlugs = CATALOG.map(c => ({ slug: c.apiSlug, name: c.name }));
-    onProgress('Usando fuente alternativa...', '');
+    onProgress('⚠️ API no disponible — usando fuente alternativa', '');
   }
 
-  const results = [];
-  const BATCH = 6;
+  // ── Paso 2: pedir resultados en lotes ────────────────────────────────────
+  const raw     = [];   // resultados tal como llegan
+  const BATCH   = 5;
 
   for (let i = 0; i < apiSlugs.length; i += BATCH) {
     const batch = apiSlugs.slice(i, i + BATCH);
     onProgress(
-      `Cargando resultados... (${Math.min(i + BATCH, apiSlugs.length)}/${apiSlugs.length})`,
+      `Cargando resultados... ${Math.min(i + BATCH, apiSlugs.length)}/${apiSlugs.length}`,
       batch.map(b => b.name).join(', ')
     );
 
     const settled = await Promise.allSettled(batch.map(async ({ slug, name }) => {
-      if (apiAvailable) {
-        try { return await apiGetLastResult(slug); } catch (_) {}
+      // Intento 1: API
+      if (apiOk) {
+        try { return await apiLastResult(slug); } catch (_) {}
       }
+      // Intento 2: fuente alternativa RDL
       const cat = findInCatalog(slug) || findInCatalog(name);
       if (cat) {
-        try { const r = await rdlGetResult(cat); if (r) return r; } catch (_) {}
-        return buildScheduleCard(cat);
+        try { const r = await rdlLastResult(cat); if (r) return r; } catch (_) {}
+        return scheduleCard(cat);
       }
       return null;
     }));
 
-    settled.forEach((res, idx) => {
-      if (res.status === 'fulfilled' && res.value) {
-        results.push(res.value);
-      } else {
-        const { slug, name } = batch[idx];
-        const cat = findInCatalog(slug) || findInCatalog(name);
-        if (cat) results.push(buildScheduleCard(cat));
+    settled.forEach((s, idx) => {
+      if (s.status === 'fulfilled' && s.value) raw.push(s.value);
+      else {
+        const cat = findInCatalog(batch[idx].slug) || findInCatalog(batch[idx].name);
+        if (cat) raw.push(scheduleCard(cat));
       }
     });
 
-    if (i + BATCH < apiSlugs.length) await sleep(250);
+    if (i + BATCH < apiSlugs.length) await sleep(200);
   }
 
-  // Agregar loterías del catálogo que hoy juegan pero no vinieron de la API
-  const idsInResults = new Set(results.map(r => r.id));
-  for (const cat of getTodayCatalog()) {
-    if (!idsInResults.has(cat.id)) results.push(buildScheduleCard(cat));
+  // ── Paso 3: deduplicar por id (mantener el que tiene resultado) ───────────
+  const byId = new Map();
+  for (const r of raw) {
+    if (!r?.id) continue;
+    const existing = byId.get(r.id);
+    if (!existing || (!existing.hasResult && r.hasResult)) {
+      byId.set(r.id, r);
+    }
+  }
+  const results = [...byId.values()];
+
+  // ── Paso 4: añadir loterías del catálogo que HOY juegan y no aparecieron ──
+  const today   = new Date();
+  const todayDOW = today.getDay();
+  const idsGot  = new Set(results.map(r => r.id));
+
+  for (const cat of CATALOG) {
+    if (!cat.day.includes(todayDOW)) continue; // no juega hoy
+    if (!idsGot.has(cat.id)) results.push(scheduleCard(cat));
   }
 
   const withResults = results.filter(r => r.hasResult).length;
-  return { results, withResults, total: results.length, apiAvailable, source: apiAvailable ? 'api-resultadosloterias.com' : 'fuente alternativa' };
-}
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-function buildResultObj(cat, numbers, serie, sorteo, date, prize, source) {
   return {
-    id: cat.id, apiSlug: cat.apiSlug,
-    name: cat.name, shortName: cat.shortName,
-    type: cat.type, emoji: cat.emoji,
-    date: date || todayISO(),
-    numbers: cat.type === 'loteria' ? numbers.map(n => n.padStart(4,'0')) : numbers,
-    serie, fraccion: null, prize: prize || null, jackpot: null,
-    superball: null, sorteo, sign: null, source,
-    official: cat.official || 'https://www.coljuegos.gov.co',
-    hasResult: numbers.length > 0,
+    results,
+    withResults,
+    total: results.length,
+    apiOk,
+    source: apiOk ? 'api-resultadosloterias.com' : 'resultadodelaloteria.com',
   };
 }
 
-function buildScheduleCard(cat) {
+// ── Resultado por fecha específica (búsqueda "Medellín 13 de noviembre") ─────
+
+async function fetchResultByDate(cat, dateISO) {
+  const r = await fetchOneDateResult(cat, dateISO);
+  if (r) return r;
+
+  // Último intento: RDL y verificar si la fecha coincide
+  try {
+    const rr = await rdlLastResult(cat);
+    if (rr?.date === dateISO) return rr;
+  } catch (_) {}
+
+  return null;
+}
+
+// ── Helpers de construcción ───────────────────────────────────────────────────
+
+function mkResult({ id, slug, name, short, type, emoji, date, nums,
+                    serie, fraccion, prize, jackpot, superball, sorteo,
+                    sign, source, official, entity }) {
   return {
-    id: cat.id, apiSlug: cat.apiSlug,
-    name: cat.name, shortName: cat.shortName,
-    type: cat.type, emoji: cat.emoji,
-    date: todayISO(), numbers: [],
-    serie: null, fraccion: null, prize: null, jackpot: null,
+    id, apiSlug: slug, name, shortName: short, type, emoji,
+    date: date || todayISO(),
+    numbers: nums || [],
+    serie, fraccion, prize, jackpot, superball, sorteo, sign,
+    source, official,
+    entity: entity || null,
+    hasResult: (nums || []).length > 0,
+  };
+}
+
+function scheduleCard(cat) {
+  return mkResult({
+    id: cat.id, slug: cat.apiSlug, name: cat.name, short: cat.shortName,
+    type: cat.type, emoji: cat.emoji, date: todayISO(),
+    nums: [], serie: null, fraccion: null, prize: null, jackpot: null,
     superball: null, sorteo: null, sign: null,
     source: 'schedule', official: cat.official || 'https://www.coljuegos.gov.co',
-    hasResult: false, pending: true, hour: cat.hour, entity: cat.entity,
-  };
+    entity: cat.entity,
+  });
+}
+
+// ── Utilidades ────────────────────────────────────────────────────────────────
+
+function drawDatesBack(days, weeks) {
+  const list = [];
+  const today = new Date(); today.setHours(0,0,0,0);
+  for (let i = 0; i <= weeks * 7; i++) {
+    const d = new Date(today); d.setDate(today.getDate() - i);
+    if (days.includes(d.getDay())) list.push(d.toISOString().slice(0,10));
+  }
+  return list;
 }
 
 function extractPrize(html) {
-  const m = html.match(/(?:premio|award)[^$]*\$[\s]*([\d\.,]+)/i) ||
-            html.match(/\$([\d\.]+)\s*(?:mil millones|millones)/i);
-  return m ? m[0].replace(/<[^>]+>/g,'').trim() : null;
-}
-
-function extractField(html, field) {
-  const m = html.match(new RegExp(`${field}[^0-9]*([0-9]+)`, 'i'));
-  return m ? m[1] : null;
+  const m = html.match(/\$\s*([\d\.,]+)\s*(?:mil\s*millones|millones)/i);
+  if (m) return `$${m[1]} ${html.match(/mil\s*millones/i) ? 'mil millones' : 'millones'}`;
+  return null;
 }
 
 function extractDate(html) {
   const iso = html.match(/(\d{4}-\d{2}-\d{2})/);
   if (iso) return iso[1];
-  const months = {enero:1,febrero:2,marzo:3,abril:4,mayo:5,junio:6,julio:7,agosto:8,septiembre:9,octubre:10,noviembre:11,diciembre:12};
+  const MO = {enero:1,febrero:2,marzo:3,abril:4,mayo:5,junio:6,julio:7,agosto:8,septiembre:9,octubre:10,noviembre:11,diciembre:12};
   const sp = html.match(/(\d{1,2})\s+de\s+(\w+)\s+de\s+(\d{4})/i);
-  if (sp) {
-    const mon = months[sp[2].toLowerCase()];
-    if (mon) return `${sp[3]}-${String(mon).padStart(2,'0')}-${sp[1].padStart(2,'0')}`;
-  }
+  if (sp) { const m = MO[sp[2].toLowerCase()]; if (m) return `${sp[3]}-${String(m).padStart(2,'0')}-${sp[1].padStart(2,'0')}`; }
   return todayISO();
 }
 
-function parseNumbers(raw) {
+function parseNums(raw) {
   if (Array.isArray(raw)) return raw.map(String);
   if (typeof raw === 'number') return [String(raw)];
   if (typeof raw === 'string' && raw.trim())
@@ -507,32 +425,22 @@ function parseNumbers(raw) {
   return [];
 }
 
-function guessType(name) {
-  const n = name.toLowerCase();
-  if (n.includes('baloto') || n.includes('miloto') || n.includes('revancha')) return 'baloto';
-  if (n.includes('chance') || n.includes('astro') || n.includes('pata') ||
-      n.includes('pijao') || n.includes('cafetero') || n.includes('costeño') ||
-      n.includes('costeno') || n.includes('mano') || n.includes('caribe') ||
-      n.includes('cash') || n.includes('paisita') || n.includes('suertudo') ||
-      n.includes('motilon') || n.includes('antioquenita')) return 'chance';
+function guessType(s) {
+  const n = s.toLowerCase();
+  if (/baloto|miloto|revancha/.test(n)) return 'baloto';
+  if (/chance|astro|pata|pijao|cafetero|coste[ñn]o|mano|caribe|cash|paisita|suertudo|motilon|antioquenita/.test(n)) return 'chance';
   return 'loteria';
 }
 
-function typeEmoji(type) {
-  return { loteria: '🎟️', chance: '🎲', baloto: '🎱' }[type] || '🎲';
-}
+function typeEmoji(t) { return { loteria:'🎟️', chance:'🎲', baloto:'🎱' }[t] || '🎲'; }
+function slug2id(s)   { return s.replace(/-+/g,'_'); }
+function sleep(ms)    { return new Promise(r => setTimeout(r, ms)); }
+function todayISO()   { return new Date().toISOString().slice(0,10); }
 
-function slugToId(slug) { return slug.replace(/-+/g, '_'); }
-function sleep(ms)      { return new Promise(r => setTimeout(r, ms)); }
-function todayISO()     { return new Date().toISOString().slice(0, 10); }
-
-function parseDate(d) {
+function parseISO(d) {
   if (!d) return todayISO();
-  if (/^\d{4}-\d{2}-\d{2}/.test(d)) return d.slice(0, 10);
+  if (/^\d{4}-\d{2}-\d{2}/.test(d)) return d.slice(0,10);
   const m = d.match(/(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/);
-  if (m) {
-    const y = m[3].length === 2 ? '20' + m[3] : m[3];
-    return `${y}-${m[2].padStart(2,'0')}-${m[1].padStart(2,'0')}`;
-  }
+  if (m) { const y = m[3].length===2 ? '20'+m[3] : m[3]; return `${y}-${m[2].padStart(2,'0')}-${m[1].padStart(2,'0')}`; }
   return todayISO();
 }

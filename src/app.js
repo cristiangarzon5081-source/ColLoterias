@@ -65,8 +65,8 @@ async function loadAllResults() {
       E.loadingMsg.textContent = msg;
       E.loadingSub.textContent = sub || '';
     });
-    STATE.all = stats.results;
-    STATE.loadStats = stats;
+    STATE.all       = stats.results;
+    STATE.loadStats = { ...stats, apiAvailable: stats.apiOk };
     applyFilters();
     renderAll();
     E.sourceBadge.innerHTML = `<span class="live-dot"></span> ${stats.withResults}/${stats.total} resultados`;
@@ -194,7 +194,6 @@ async function openDetailPanel(r) {
   const cat = findInCatalog(r.id) || findInCatalog(r.apiSlug);
   const typeLabel = { loteria: 'Lotería', chance: 'Chance', baloto: 'Baloto' }[r.type] || r.type;
 
-  // Renderizar panel inicial con el último resultado
   E.modalContent.innerHTML = renderDetailHeader(r, typeLabel) +
     `<div class="modal-tabs">
       <button class="tab-btn active" data-tab="last">Último sorteo</button>
@@ -202,28 +201,30 @@ async function openDetailPanel(r) {
     </div>
     <div id="tabLast">${renderResultDetail(r)}</div>
     <div id="tabHistory" class="hidden">
-      <div class="history-loading"><div class="spinner-sm"></div> Cargando historial...</div>
+      <div class="history-loading"><div class="spinner-sm"></div> Cargando sorteos anteriores...</div>
     </div>`;
 
   E.modalOverlay.classList.remove('hidden');
   document.body.style.overflow = 'hidden';
+  let historyLoaded = false;
 
-  // Tabs
   E.modalContent.querySelectorAll('.tab-btn').forEach(btn => {
     btn.addEventListener('click', async () => {
       E.modalContent.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
       btn.classList.add('active');
       const tab = btn.dataset.tab;
-      $('tabLast').classList.toggle('hidden', tab !== 'last');
-      $('tabHistory').classList.toggle('hidden', tab !== 'history');
+      document.getElementById('tabLast').classList.toggle('hidden', tab !== 'last');
+      document.getElementById('tabHistory').classList.toggle('hidden', tab !== 'history');
 
-      // Cargar historial la primera vez que se abre esa pestaña
-      if (tab === 'history' && $('tabHistory').querySelector('.history-loading') && cat) {
+      if (tab === 'history' && !historyLoaded && cat) {
+        historyLoaded = true;
         try {
           const history = await fetchHistory(cat);
-          $('tabHistory').innerHTML = renderHistoryTab(history, cat);
+          document.getElementById('tabHistory').innerHTML = renderHistoryTab(history, cat);
         } catch (e) {
-          $('tabHistory').innerHTML = `<div class="history-error">No se pudo cargar el historial.<br><a href="${cat.official || '#'}" target="_blank">Ver en fuente oficial →</a></div>`;
+          document.getElementById('tabHistory').innerHTML =
+            `<div class="history-error">No se pudo cargar el historial.<br>
+             <a href="${cat.official || 'https://www.coljuegos.gov.co'}" target="_blank" rel="noopener">Ver en fuente oficial →</a></div>`;
         }
       }
     });
@@ -236,7 +237,7 @@ function renderDetailHeader(r, typeLabel) {
       <span class="modal-emoji">${r.emoji}</span>
       <div>
         <h2 class="modal-title">${r.name}</h2>
-        <p class="modal-subtitle">${typeLabel} · ${r.entity || ''}</p>
+        <p class="modal-subtitle">${typeLabel}${r.entity ? ' · ' + r.entity : ''}</p>
       </div>
     </div>`;
 }

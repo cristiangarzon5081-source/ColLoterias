@@ -218,13 +218,13 @@ async function openDetailPanel(r) {
 
       if (tab === 'history' && !historyLoaded && cat) {
         historyLoaded = true;
+        const tabEl = document.getElementById('tabHistory');
         try {
           const history = await fetchHistory(cat);
-          document.getElementById('tabHistory').innerHTML = renderHistoryTab(history, cat);
+          tabEl.innerHTML = renderHistoryTab(history, cat);
         } catch (e) {
-          document.getElementById('tabHistory').innerHTML =
-            `<div class="history-error">No se pudo cargar el historial.<br>
-             <a href="${cat.official || 'https://www.coljuegos.gov.co'}" target="_blank" rel="noopener">Ver en fuente oficial →</a></div>`;
+          console.error('[history]', e);
+          tabEl.innerHTML = renderHistoryFallback(cat);
         }
       }
     });
@@ -275,12 +275,25 @@ function renderResultDetail(r) {
     <a class="modal-official-link" href="${r.official}" target="_blank" rel="noopener">🔗 Ver en fuente oficial</a>`;
 }
 
+function renderHistoryFallback(cat) {
+  const rdlUrl = `https://resultadodelaloteria.com/colombia/${cat.rdlSlug}`;
+  const lySlugVal = typeof LY_SLUG !== 'undefined' ? LY_SLUG[cat.id] : null;
+  const lyUrl = lySlugVal ? `https://www.loteriaya.com.co/loteria/${lySlugVal}/historial` : null;
+  return `<div class="history-fallback">
+    <div class="hf-icon">📡</div>
+    <p>Los proxies CORS no respondieron a tiempo.</p>
+    <p class="hf-sub">Consulta el historial directamente en la fuente oficial:</p>
+    <div class="hf-links">
+      <a href="${rdlUrl}" target="_blank" rel="noopener" class="hf-link">📋 resultadodelaloteria.com →</a>
+      ${lyUrl ? `<a href="${lyUrl}" target="_blank" rel="noopener" class="hf-link">📅 loteriaya.com.co →</a>` : ''}
+      ${cat.official ? `<a href="${cat.official}" target="_blank" rel="noopener" class="hf-link">🏛️ Fuente oficial →</a>` : ''}
+    </div>
+  </div>`;
+}
+
 function renderHistoryTab(history, cat) {
   if (!history || history.length === 0) {
-    return `<div class="history-empty">
-      No se encontraron resultados anteriores.<br>
-      <a href="${cat.official || '#'}" target="_blank" rel="noopener">Ver historial oficial →</a>
-    </div>`;
+    return renderHistoryFallback(cat);
   }
 
   const rows = history.map(r => {

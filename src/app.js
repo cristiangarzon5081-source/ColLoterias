@@ -1,533 +1,459 @@
 /**
- * app.js
- * Main application controller.
- * Handles: data loading, search, filtering, rendering, modal, voice integration.
+ * app.js — Controlador principal
  */
 
-// ─── State ──────────────────────────────────────────────────────────────────
-
+// ── Estado global ─────────────────────────────────────────────────────────────
 const STATE = {
-  allResults: [],       // full set loaded from API
-  filtered: [],         // currently displayed
-  activeFilter: 'all',  // quick filter
-  query: '',            // text search
+  all: [],          // todos los resultados cargados
+  filtered: [],     // resultados actuales visibles
+  activeFilter: 'all',
+  query: '',
   loading: false,
-  fromSource: '',
-  voiceActive: false,
-  suggestionIndex: -1,
+  loadStats: null,  // { withResults, total, errors, source }
 };
 
-// ─── DOM Refs ────────────────────────────────────────────────────────────────
-
+// ── DOM ───────────────────────────────────────────────────────────────────────
 const $ = id => document.getElementById(id);
-
-const els = {
-  searchInput:      $('searchInput'),
-  searchBox:        $('searchBox'),
-  voiceBtn:         $('voiceBtn'),
-  micIcon:          $('micIcon'),
-  clearBtn:         $('clearBtn'),
-  voiceStatus:      $('voiceStatus'),
-  searchSuggestions:$('searchSuggestions'),
-  quickFilters:     $('quickFilters'),
-  loadingState:     $('loadingState'),
-  errorState:       $('errorState'),
-  errorMsg:         $('errorMsg'),
-  retryBtn:         $('retryBtn'),
-  emptyState:       $('emptyState'),
-  emptyQuery:       $('emptyQuery'),
-  resultsSection:   $('resultsSection'),
-  resultsTitle:     $('resultsTitle'),
-  resultsCount:     $('resultsCount'),
-  lastUpdate:       $('lastUpdate'),
-  cardsGrid:        $('cardsGrid'),
-  modalOverlay:     $('modalOverlay'),
-  modal:            $('modal'),
-  modalClose:       $('modalClose'),
-  modalContent:     $('modalContent'),
+const E = {
+  searchInput:   $('searchInput'),
+  searchBox:     $('searchBox'),
+  voiceBtn:      $('voiceBtn'),
+  micIcon:       $('micIcon'),
+  clearBtn:      $('clearBtn'),
+  voiceStatus:   $('voiceStatus'),
+  suggestions:   $('searchSuggestions'),
+  filters:       $('quickFilters'),
+  loadingState:  $('loadingState'),
+  loadingMsg:    $('loadingMsg'),
+  loadingSub:    $('loadingSub'),
+  errorState:    $('errorState'),
+  errorMsg:      $('errorMsg'),
+  retryBtn:      $('retryBtn'),
+  emptyState:    $('emptyState'),
+  emptyQuery:    $('emptyQuery'),
+  resultsSection:$('resultsSection'),
+  resultsTitle:  $('resultsTitle'),
+  resultsCount:  $('resultsCount'),
+  lastUpdate:    $('lastUpdate'),
+  apiNotice:     $('apiNotice'),
+  cardsGrid:     $('cardsGrid'),
+  sourceBadge:   $('sourceBadge'),
+  refreshBtn:    $('refreshBtn'),
+  modalOverlay:  $('modalOverlay'),
+  modalClose:    $('modalClose'),
+  modalContent:  $('modalContent'),
 };
 
-// ─── Init ────────────────────────────────────────────────────────────────────
-
+// ── Init ──────────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
   setupVoice();
   setupSearch();
   setupFilters();
   setupModal();
-  loadResults();
+  E.refreshBtn.addEventListener('click', () => loadAllResults());
+  loadAllResults();
 });
 
-// ─── Data Loading ─────────────────────────────────────────────────────────────
-
-async function loadResults() {
+// ── Carga de datos ────────────────────────────────────────────────────────────
+async function loadAllResults() {
+  if (STATE.loading) return;
+  STATE.loading = true;
   showLoading();
+
   try {
-    const { results, fromSource, error } = await fetchTodayResults();
-    STATE.allResults = results;
-    STATE.fromSource = fromSource;
-    applyFiltersAndSearch();
-    showResults();
-    updateLastUpdate(fromSource, error);
+    const { results, withResults, total, errors, apiAvailable, source } =
+      await fetchAllResults((msg, sub) => {
+        E.loadingMsg.textContent = msg;
+        E.loadingSub.textContent = sub || '';
+      });
+
+    STATE.all = results;
+    STATE.loadStats = { withResults, total, errors, apiAvailable, source };
+    applyFilters();
+    renderAll();
+    updateHeaderBadge(source, withResults, total);
+
   } catch (err) {
-    showError('No se pudieron cargar los resultados. Verifica tu conexión.');
+    showError('No se pudieron cargar los resultados. ' + (err.message || ''));
     console.error(err);
+  } finally {
+    STATE.loading = false;
   }
 }
 
-function updateLastUpdate(source, warning) {
+function updateHeaderBadge(source, withResults, total) {
+  E.sourceBadge.innerHTML = `<span class="live-dot"></span> ${withResults}/${total} resultados`;
   const now = new Date();
-  const timeStr = now.toLocaleTimeString('es-CO', { hour: '2-digit', minute: '2-digit' });
-  const sourceLabel = {
-    'api':      '• Fuente: API Oficial',
-    'quecayo':  '• Fuente: QuéCayó',
-    'schedule': '• Horario programado',
-  }[source] || '';
-  els.lastUpdate.textContent = `Actualizado ${timeStr} ${sourceLabel}`;
-  if (warning) {
-    els.voiceStatus.textContent = `ℹ️ ${warning}`;
-    setTimeout(() => { if (!STATE.voiceActive) els.voiceStatus.textContent = ''; }, 6000);
-  }
+  const t = now.toLocaleTimeString('es-CO', { hour: '2-digit', minute: '2-digit' });
+  E.lastUpdate.textContent = `Actualizado ${t} · ${source}`;
 }
 
-// ─── Filtering & Search ──────────────────────────────────────────────────────
+// ── Filtrado ──────────────────────────────────────────────────────────────────
+function applyFilters() {
+  let list = [...STATE.all];
 
-function applyFiltersAndSearch() {
-  let results = [...STATE.allResults];
-
-  // Quick filter
   if (STATE.activeFilter !== 'all') {
-    if (STATE.activeFilter === 'hoy') {
-      const todayISO = new Date().toISOString().slice(0, 10);
-      results = results.filter(r => r.date === todayISO || !r.date);
-    } else {
-      results = results.filter(r => r.type === STATE.activeFilter);
-    }
+    list = list.filter(r => r.type === STATE.activeFilter);
   }
 
-  // Text / voice search
   if (STATE.query.trim()) {
-    const q = STATE.query.toLowerCase().trim();
-    results = results.filter(r =>
-      r.name.toLowerCase().includes(q) ||
-      r.id.includes(q) ||
-      r.type.includes(q) ||
-      (r.entity && r.entity.toLowerCase().includes(q))
+    const q = removeDiacritics(STATE.query.toLowerCase().trim());
+    list = list.filter(r =>
+      removeDiacritics(r.name.toLowerCase()).includes(q) ||
+      removeDiacritics((r.shortName||'').toLowerCase()).includes(q) ||
+      r.id.includes(q.replace(/\s+/g,'-')) ||
+      r.type.includes(q)
     );
   }
 
-  // Sort: baloto first, then alphabetical
-  results.sort((a, b) => {
-    const order = { baloto: 0, loteria: 1, chance: 2 };
-    const ao = order[a.type] ?? 3;
-    const bo = order[b.type] ?? 3;
-    if (ao !== bo) return ao - bo;
+  // Ordenar: baloto primero, con resultados antes de pendientes, luego alfab.
+  list.sort((a, b) => {
+    const typeOrder = { baloto: 0, loteria: 1, chance: 2 };
+    if (typeOrder[a.type] !== typeOrder[b.type]) return typeOrder[a.type] - typeOrder[b.type];
+    if (a.hasResult !== b.hasResult) return a.hasResult ? -1 : 1;
     return a.name.localeCompare(b.name, 'es');
   });
 
-  STATE.filtered = results;
+  STATE.filtered = list;
 }
 
-// ─── Rendering ───────────────────────────────────────────────────────────────
-
-function showResults() {
-  if (STATE.filtered.length === 0 && STATE.query) {
+// ── Render ────────────────────────────────────────────────────────────────────
+function renderAll() {
+  if (STATE.filtered.length === 0 && STATE.query.trim()) {
     showEmpty();
     return;
   }
-  hideAll();
-  els.resultsSection.classList.remove('hidden');
 
-  // Title
+  hideAll();
+  E.resultsSection.classList.remove('hidden');
+
+  // Título
   if (STATE.query) {
-    els.resultsTitle.textContent = `Resultados para "${STATE.query}"`;
+    E.resultsTitle.textContent = `Resultados para "${STATE.query}"`;
   } else if (STATE.activeFilter !== 'all') {
-    const labels = { loteria: 'Loterías', chance: 'Chances', baloto: 'Baloto', hoy: 'Hoy' };
-    els.resultsTitle.textContent = labels[STATE.activeFilter] || 'Resultados';
+    const labels = { loteria: '🎟️ Loterías', chance: '🎲 Chances', baloto: '🎱 Baloto' };
+    E.resultsTitle.textContent = labels[STATE.activeFilter] || 'Resultados';
   } else {
     const day = new Date().toLocaleDateString('es-CO', { weekday: 'long', day: 'numeric', month: 'long' });
-    els.resultsTitle.textContent = `Resultados — ${capitalize(day)}`;
+    E.resultsTitle.textContent = `${cap(day)}`;
   }
 
-  els.resultsCount.textContent = `${STATE.filtered.length} resultado${STATE.filtered.length !== 1 ? 's' : ''}`;
-  els.cardsGrid.innerHTML = '';
+  const withRes = STATE.filtered.filter(r => r.hasResult).length;
+  const pending = STATE.filtered.length - withRes;
+  E.resultsCount.textContent = `${withRes} con resultado${pending > 0 ? ` · ${pending} pendientes` : ''}`;
 
-  // Render Baloto special card first if present
-  const balotoCards = STATE.filtered.filter(r => r.type === 'baloto');
-  const otherCards  = STATE.filtered.filter(r => r.type !== 'baloto');
-
-  if (balotoCards.length > 0 && STATE.activeFilter !== 'loteria' && STATE.activeFilter !== 'chance') {
-    const balotoContainer = document.createElement('div');
-    balotoContainer.className = 'baloto-section';
-    balotoContainer.style.cssText = 'grid-column:1/-1; display:grid; grid-template-columns:repeat(auto-fill,minmax(300px,1fr)); gap:16px;';
-    balotoCards.forEach(r => balotoContainer.appendChild(renderCard(r, true)));
-    els.cardsGrid.appendChild(balotoContainer);
+  // Aviso si hay loterías pendientes
+  if (STATE.loadStats && !STATE.loadStats.apiAvailable) {
+    E.apiNotice.classList.remove('hidden');
+    E.apiNotice.innerHTML = `⚠️ La API principal no respondió. Se usó fuente alternativa.
+      <a href="https://api-resultadosloterias.com" target="_blank" rel="noopener">Más info</a>`;
+  } else {
+    E.apiNotice.classList.add('hidden');
   }
 
-  otherCards.forEach(r => els.cardsGrid.appendChild(renderCard(r, false)));
+  E.cardsGrid.innerHTML = '';
+  STATE.filtered.forEach(r => E.cardsGrid.appendChild(createCard(r)));
 }
 
-function renderCard(r, isBaloto) {
-  const card = document.createElement('div');
-  card.className = 'lottery-card' + (isBaloto && r.id === 'baloto' ? ' card-baloto-special' : '');
-  card.setAttribute('data-id', r.id);
-  card.setAttribute('role', 'button');
-  card.setAttribute('tabindex', '0');
-  card.setAttribute('aria-label', `Ver detalle de ${r.name}`);
+function createCard(r) {
+  const div = document.createElement('div');
+  const isSpecial = r.type === 'baloto' && r.id === 'baloto';
+  div.className = 'lottery-card' + (isSpecial ? ' card-baloto' : '');
+  div.setAttribute('role', 'button');
+  div.setAttribute('tabindex', '0');
+  div.setAttribute('aria-label', r.name);
 
-  const badgeClass = `badge-${r.type}`;
+  const badgeCls = { loteria: 'badge-loteria', chance: 'badge-chance', baloto: 'badge-baloto' }[r.type];
   const typeLabel = { loteria: 'Lotería', chance: 'Chance', baloto: 'Baloto' }[r.type] || r.type;
-  const dateFormatted = formatDate(r.date);
 
-  let numbersHTML = '';
-  if (r.numbers && r.numbers.length > 0) {
-    numbersHTML = `<div class="card-numbers">`;
+  // Números
+  let numsHtml = '';
+  if (r.hasResult && r.numbers.length > 0) {
+    numsHtml = `<div class="card-numbers">`;
     r.numbers.forEach((n, i) => {
-      const isSuperball = r.type === 'baloto' && i === r.numbers.length - 1 && r.superball !== undefined;
-      const cls = isSuperball ? 'num-ball superbalota' : `num-ball type-${r.type}`;
-      const display = r.type === 'baloto' ? String(n).padStart(2, '0') : String(n).padStart(r.type === 'loteria' ? 4 : 2, '0');
-      numbersHTML += `<div class="${cls}">${display}</div>`;
-      if (isSuperball && i > 0) {
-        // Add separator before superball
-      }
+      const isSuperball = r.type === 'baloto' && i === r.numbers.length - 1 && r.superball != null;
+      const cls = isSuperball ? 'num-ball superball' : `num-ball nb-${r.type}`;
+      numsHtml += `<span class="${cls}">${n}</span>`;
     });
-    numbersHTML += `</div>`;
-  } else if (r.pending) {
-    numbersHTML = `<div class="card-numbers"><span style="color:var(--text3);font-size:13px">⏰ Sorteo a las ${r.hour}</span></div>`;
-  } else {
-    numbersHTML = `<div class="card-numbers"><span style="color:var(--text3);font-size:13px">Sin resultado aún</span></div>`;
+    if (r.sign) numsHtml += `<span class="sign-badge">${r.sign}</span>`;
+    numsHtml += `</div>`;
+  } else if (r.pending || !r.hasResult) {
+    const now = new Date();
+    const [hh, mm] = (r.hour || '').split(':').map(Number);
+    const sorteoTime = new Date(); sorteoTime.setHours(hh||22, mm||0, 0, 0);
+    const upcoming = sorteoTime > now;
+    numsHtml = `<div class="card-numbers pending">
+      <span class="pending-label">${upcoming ? `⏰ Sorteo a las ${r.hour}` : '⌛ Resultado no disponible aún'}</span>
+    </div>`;
   }
 
-  let infoHTML = '';
+  // Info chips
+  let infoHtml = '';
   const chips = [];
   if (r.sorteo)   chips.push({ label: 'Sorteo', value: `#${r.sorteo}` });
   if (r.serie)    chips.push({ label: 'Serie', value: r.serie });
   if (r.fraccion) chips.push({ label: 'Fracción', value: r.fraccion });
-  if (r.prize)    chips.push({ label: 'Premio', value: formatPrize(r.prize), cls: 'prize' });
-  if (r.jackpot && r.type === 'baloto') chips.push({ label: 'Acumulado', value: formatPrize(r.jackpot), cls: 'prize' });
-  if (chips.length > 0) {
-    infoHTML = `<div class="card-info-row">` +
-      chips.map(c => `<div class="info-chip"><span class="chip-label">${c.label}</span><span class="chip-value ${c.cls||''}">${c.value}</span></div>`).join('') +
+  if (r.prize)    chips.push({ label: 'Premio', value: fmtPrize(r.prize), prize: true });
+  if (r.jackpot && r.type === 'baloto') chips.push({ label: 'Acumulado', value: fmtPrize(r.jackpot), prize: true });
+  if (chips.length) {
+    infoHtml = `<div class="card-info">` +
+      chips.map(c => `<div class="info-chip"><span class="chip-lbl">${c.label}</span><span class="chip-val${c.prize?' prize':''}">${c.value}</span></div>`).join('') +
       `</div>`;
   }
 
-  // Baloto jackpot banner
-  let jackpotBanner = '';
+  // Baloto acumulado banner
+  let banner = '';
   if (r.type === 'baloto' && r.jackpot) {
-    jackpotBanner = `<div class="baloto-jackpot">Acumulado actual</div><div class="baloto-amount">${formatPrize(r.jackpot)}</div>`;
+    banner = `<div class="baloto-banner"><span class="bb-label">Acumulado</span><span class="bb-amount">${fmtPrize(r.jackpot)}</span></div>`;
   }
 
-  card.innerHTML = `
-    ${r.pending ? '<div class="card-status pending"></div>' : '<div class="card-status"></div>'}
-    <div class="card-header">
-      <div class="card-emoji">${r.emoji}</div>
+  div.innerHTML = `
+    <div class="card-status-dot ${r.hasResult ? 'has-result' : 'pending'}"></div>
+    <div class="card-top">
+      <span class="card-emoji">${r.emoji}</span>
       <div class="card-meta">
         <div class="card-name">${r.name}</div>
-        <div class="card-date">${dateFormatted}</div>
+        <div class="card-date">${fmtDate(r.date)}</div>
       </div>
-      <span class="card-type-badge ${badgeClass}">${typeLabel}</span>
+      <span class="card-badge ${badgeCls}">${typeLabel}</span>
     </div>
-    ${jackpotBanner}
-    ${numbersHTML}
-    ${infoHTML}
+    ${banner}
+    ${numsHtml}
+    ${infoHtml}
   `;
 
-  card.addEventListener('click', () => openModal(r));
-  card.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') openModal(r); });
-  return card;
+  div.addEventListener('click',   () => openModal(r));
+  div.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') openModal(r); });
+  return div;
 }
 
-// ─── Modal ───────────────────────────────────────────────────────────────────
-
+// ── Modal ─────────────────────────────────────────────────────────────────────
 function openModal(r) {
   const typeLabel = { loteria: 'Lotería', chance: 'Chance', baloto: 'Baloto' }[r.type] || r.type;
-  const dateFormatted = formatDate(r.date);
 
-  let numbersHTML = '';
-  if (r.numbers && r.numbers.length > 0) {
-    numbersHTML = `<div class="modal-numbers">`;
+  let numsHtml = '';
+  if (r.hasResult && r.numbers.length > 0) {
+    numsHtml = `<div class="modal-numbers">`;
     r.numbers.forEach((n, i) => {
-      const isSuperball = r.type === 'baloto' && i === r.numbers.length - 1 && r.superball !== undefined;
-      const cls = isSuperball ? 'modal-num-ball superbalota' : `modal-num-ball type-${r.type}`;
-      const display = r.type === 'baloto' ? String(n).padStart(2, '0') : String(n).padStart(r.type === 'loteria' ? 4 : 2, '0');
-      numbersHTML += `<div class="${cls}">${display}</div>`;
+      const isSuperball = r.type === 'baloto' && i === r.numbers.length - 1 && r.superball != null;
+      const cls = isSuperball ? 'modal-ball superball' : `modal-ball nb-${r.type}`;
+      numsHtml += `<span class="${cls}">${n}</span>`;
     });
-    numbersHTML += `</div>`;
-  } else if (r.pending) {
-    numbersHTML = `<div style="color:var(--text2);margin-bottom:20px">⏰ El sorteo es a las <strong>${r.hour}</strong>. Vuelve más tarde.</div>`;
+    if (r.sign) numsHtml += `<span class="modal-sign">${r.sign}</span>`;
+    numsHtml += `</div>`;
+  } else {
+    numsHtml = `<div class="modal-no-result">⏰ El resultado aún no está disponible.<br>Sorteo: ${r.hour || 'Ver fuente oficial'}</div>`;
   }
 
-  const details = [];
-  if (r.sorteo)   details.push({ label: 'Número de Sorteo', value: `#${r.sorteo}` });
-  if (r.serie)    details.push({ label: 'Serie', value: r.serie });
-  if (r.fraccion) details.push({ label: 'Fracción', value: r.fraccion });
-  if (r.prize)    details.push({ label: 'Premio Mayor', value: formatPrize(r.prize), prize: true });
-  if (r.jackpot)  details.push({ label: 'Acumulado', value: formatPrize(r.jackpot), prize: true });
-  if (r.entity)   details.push({ label: 'Entidad', value: r.entity });
+  const details = [
+    r.sorteo   && { label: 'Sorteo', value: `#${r.sorteo}` },
+    r.serie    && { label: 'Serie', value: r.serie },
+    r.fraccion && { label: 'Fracción', value: r.fraccion },
+    r.prize    && { label: 'Premio Mayor', value: fmtPrize(r.prize), prize: true },
+    r.jackpot  && { label: 'Acumulado Baloto', value: fmtPrize(r.jackpot), prize: true },
+    r.entity   && { label: 'Entidad', value: r.entity },
+    r.source   && { label: 'Fuente de datos', value: r.source },
+  ].filter(Boolean);
 
-  let detailsHTML = '';
-  if (details.length > 0) {
-    detailsHTML = `<div class="modal-details-grid">` +
-      details.map(d => `
-        <div class="modal-detail-box">
-          <div class="modal-detail-label">${d.label}</div>
-          <div class="modal-detail-value ${d.prize ? 'prize' : ''}">${d.value}</div>
-        </div>
-      `).join('') +
-      `</div>`;
-  }
-
-  els.modalContent.innerHTML = `
-    <div class="modal-title">${r.emoji} ${r.name}</div>
-    <div class="modal-date">${typeLabel} · ${dateFormatted}</div>
-    ${numbersHTML}
-    ${detailsHTML}
-    <div class="modal-source">
-      Datos vía <a href="${r.official}" target="_blank" rel="noopener">${r.source}</a> ·
-      Fuente oficial: <a href="https://www.coljuegos.gov.co" target="_blank" rel="noopener">Coljuegos</a>
-    </div>
+  E.modalContent.innerHTML = `
+    <div class="modal-emoji">${r.emoji}</div>
+    <h2 class="modal-title">${r.name}</h2>
+    <p class="modal-subtitle">${typeLabel} · ${fmtDate(r.date)}</p>
+    ${numsHtml}
+    ${details.length ? `<div class="modal-grid">${details.map(d=>`
+      <div class="modal-box">
+        <div class="modal-box-label">${d.label}</div>
+        <div class="modal-box-value${d.prize?' prize':''}">${d.value}</div>
+      </div>`).join('')}</div>` : ''}
+    <a class="modal-official-link" href="${r.official}" target="_blank" rel="noopener">
+      🔗 Ver en fuente oficial
+    </a>
   `;
 
-  els.modalOverlay.classList.remove('hidden');
+  E.modalOverlay.classList.remove('hidden');
   document.body.style.overflow = 'hidden';
-  els.modalClose.focus();
 }
 
 function closeModal() {
-  els.modalOverlay.classList.add('hidden');
+  E.modalOverlay.classList.add('hidden');
   document.body.style.overflow = '';
 }
 
 function setupModal() {
-  els.modalClose.addEventListener('click', closeModal);
-  els.modalOverlay.addEventListener('click', e => {
-    if (e.target === els.modalOverlay) closeModal();
-  });
-  document.addEventListener('keydown', e => {
-    if (e.key === 'Escape') closeModal();
-  });
+  E.modalClose.addEventListener('click', closeModal);
+  E.modalOverlay.addEventListener('click', e => { if (e.target === E.modalOverlay) closeModal(); });
+  document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
 }
 
-// ─── Search ───────────────────────────────────────────────────────────────────
-
+// ── Búsqueda por texto ────────────────────────────────────────────────────────
 function setupSearch() {
-  let debounceTimer;
-
-  els.searchInput.addEventListener('input', () => {
-    STATE.query = els.searchInput.value;
+  let debounce;
+  E.searchInput.addEventListener('input', () => {
+    STATE.query = E.searchInput.value;
     updateClearBtn();
     showSuggestions(STATE.query);
-    clearTimeout(debounceTimer);
-    debounceTimer = setTimeout(() => {
-      applyFiltersAndSearch();
-      showResults();
-    }, 220);
+    clearTimeout(debounce);
+    debounce = setTimeout(() => { applyFilters(); renderAll(); }, 220);
   });
 
-  els.searchInput.addEventListener('keydown', e => {
-    if (e.key === 'Enter') {
-      e.preventDefault();
-      hideSuggestions();
-      applyFiltersAndSearch();
-      showResults();
-    }
-    if (e.key === 'ArrowDown') navigateSuggestions(1);
-    if (e.key === 'ArrowUp')   navigateSuggestions(-1);
+  E.searchInput.addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); hideSuggestions(); applyFilters(); renderAll(); }
+    if (e.key === 'ArrowDown') navigateSugg(1);
+    if (e.key === 'ArrowUp')   navigateSugg(-1);
     if (e.key === 'Escape')    hideSuggestions();
   });
 
-  els.clearBtn.addEventListener('click', () => {
-    els.searchInput.value = '';
+  E.clearBtn.addEventListener('click', () => {
+    E.searchInput.value = '';
     STATE.query = '';
     updateClearBtn();
     hideSuggestions();
-    applyFiltersAndSearch();
-    showResults();
-    els.searchInput.focus();
+    applyFilters();
+    renderAll();
+    E.searchInput.focus();
   });
 
-  // Hide suggestions on outside click
   document.addEventListener('click', e => {
-    if (!els.searchBox.contains(e.target)) hideSuggestions();
+    if (!E.searchBox.contains(e.target)) hideSuggestions();
   });
 }
 
-function updateClearBtn() {
-  if (STATE.query.trim()) els.clearBtn.classList.add('visible');
-  else els.clearBtn.classList.remove('visible');
-}
+let suggIdx = -1;
 
 function showSuggestions(query) {
   if (!query.trim()) { hideSuggestions(); return; }
-  const matches = searchCatalog(query).slice(0, 8);
-  if (matches.length === 0) { hideSuggestions(); return; }
-
-  STATE.suggestionIndex = -1;
-  els.searchSuggestions.innerHTML = matches.map((m, i) => `
-    <div class="suggestion-item" data-index="${i}" data-id="${m.id}" data-name="${m.name}" role="option" tabindex="-1">
+  const matches = searchCatalog(query, STATE.activeFilter !== 'all' ? STATE.activeFilter : null).slice(0, 7);
+  if (!matches.length) { hideSuggestions(); return; }
+  suggIdx = -1;
+  E.suggestions.innerHTML = matches.map((m, i) => `
+    <div class="sugg-item" data-idx="${i}" data-name="${m.name}" role="option">
       <span class="sugg-emoji">${m.emoji}</span>
-      <span class="sugg-name">${highlightMatch(m.name, query)}</span>
+      <span class="sugg-name">${hlMatch(m.name, query)}</span>
       <span class="sugg-type">${m.type}</span>
-    </div>
-  `).join('');
-  els.searchSuggestions.classList.add('visible');
-
-  els.searchSuggestions.querySelectorAll('.suggestion-item').forEach(item => {
-    item.addEventListener('click', () => {
-      const name = item.getAttribute('data-name');
-      els.searchInput.value = name;
-      STATE.query = name;
+    </div>`).join('');
+  E.suggestions.classList.add('visible');
+  E.suggestions.querySelectorAll('.sugg-item').forEach(el => {
+    el.addEventListener('click', () => {
+      E.searchInput.value = el.dataset.name;
+      STATE.query = el.dataset.name;
       updateClearBtn();
       hideSuggestions();
-      applyFiltersAndSearch();
-      showResults();
+      applyFilters();
+      renderAll();
     });
   });
 }
 
 function hideSuggestions() {
-  els.searchSuggestions.classList.remove('visible');
-  STATE.suggestionIndex = -1;
+  E.suggestions.classList.remove('visible');
+  suggIdx = -1;
 }
 
-function navigateSuggestions(dir) {
-  const items = els.searchSuggestions.querySelectorAll('.suggestion-item');
-  if (items.length === 0) return;
-  STATE.suggestionIndex = Math.max(-1, Math.min(items.length - 1, STATE.suggestionIndex + dir));
-  items.forEach((item, i) => item.classList.toggle('highlighted', i === STATE.suggestionIndex));
-  if (STATE.suggestionIndex >= 0) {
-    items[STATE.suggestionIndex].scrollIntoView({ block: 'nearest' });
-    els.searchInput.value = items[STATE.suggestionIndex].getAttribute('data-name');
+function navigateSugg(dir) {
+  const items = E.suggestions.querySelectorAll('.sugg-item');
+  if (!items.length) return;
+  suggIdx = Math.max(-1, Math.min(items.length - 1, suggIdx + dir));
+  items.forEach((el, i) => el.classList.toggle('highlighted', i === suggIdx));
+  if (suggIdx >= 0) {
+    E.searchInput.value = items[suggIdx].dataset.name;
+    items[suggIdx].scrollIntoView({ block: 'nearest' });
   }
 }
 
-function highlightMatch(text, query) {
+function hlMatch(text, query) {
   const q = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   return text.replace(new RegExp(`(${q})`, 'gi'), '<strong>$1</strong>');
 }
 
-// ─── Quick Filters ────────────────────────────────────────────────────────────
+function updateClearBtn() {
+  E.clearBtn.classList.toggle('visible', !!STATE.query.trim());
+}
 
+// ── Filtros rápidos ───────────────────────────────────────────────────────────
 function setupFilters() {
-  els.quickFilters.addEventListener('click', e => {
+  E.filters.addEventListener('click', e => {
     const chip = e.target.closest('.filter-chip');
     if (!chip) return;
-    els.quickFilters.querySelectorAll('.filter-chip').forEach(c => c.classList.remove('active'));
+    E.filters.querySelectorAll('.filter-chip').forEach(c => c.classList.remove('active'));
     chip.classList.add('active');
-    STATE.activeFilter = chip.getAttribute('data-filter');
-    applyFiltersAndSearch();
-    showResults();
+    STATE.activeFilter = chip.dataset.filter;
+    applyFilters();
+    renderAll();
   });
 }
 
-// ─── Voice ────────────────────────────────────────────────────────────────────
-
+// ── Voz ───────────────────────────────────────────────────────────────────────
 function setupVoice() {
   const voice = new VoiceSearch({
-    onResult(normalized, raw) {
-      STATE.voiceActive = false;
-      els.voiceBtn.classList.remove('active');
-      els.micIcon.textContent = '🎙️';
-      els.searchBox.classList.remove('listening');
-
-      els.searchInput.value = normalized;
+    onResult(normalized) {
+      E.searchBox.classList.remove('listening');
+      E.voiceBtn.classList.remove('active');
+      E.micIcon.textContent = '🎙️';
+      E.searchInput.value = normalized;
       STATE.query = normalized;
       updateClearBtn();
       hideSuggestions();
-      applyFiltersAndSearch();
-      showResults();
-
-      // Clear status after 3s
-      setTimeout(() => { els.voiceStatus.textContent = ''; }, 3000);
+      applyFilters();
+      renderAll();
     },
-    onStateChange(state, message) {
-      els.voiceStatus.textContent = message;
-      if (state === 'listening' || state === 'sound' || state === 'speech' || state === 'interim') {
-        els.searchBox.classList.add('listening');
-        els.voiceBtn.classList.add('active');
-        els.micIcon.textContent = '🔴';
-        STATE.voiceActive = true;
-      } else {
-        els.searchBox.classList.remove('listening');
-        els.voiceBtn.classList.remove('active');
-        els.micIcon.textContent = '🎙️';
-        STATE.voiceActive = false;
-      }
-      if (state === 'done' || state === 'error') {
-        setTimeout(() => { if (!STATE.voiceActive) els.voiceStatus.textContent = ''; }, 3000);
-      }
+    onStateChange(state, msg) {
+      E.voiceStatus.textContent = msg;
+      const active = ['listening','speech','interim','sound'].includes(state);
+      E.searchBox.classList.toggle('listening', active);
+      E.voiceBtn.classList.toggle('active', active);
+      E.micIcon.textContent = active ? '🔴' : '🎙️';
     },
     onError(msg) {
-      els.voiceStatus.textContent = msg;
-      els.voiceBtn.disabled = !voice.isSupported();
+      E.voiceStatus.textContent = msg;
+      setTimeout(() => { E.voiceStatus.textContent = ''; }, 4000);
     },
   });
 
-  els.voiceBtn.addEventListener('click', () => {
-    voice.toggle();
-  });
+  E.voiceBtn.addEventListener('click', () => voice.toggle());
 
-  // Hide mic button if not supported after small delay
-  setTimeout(() => {
-    if (!voice.isSupported()) {
-      els.voiceBtn.style.opacity = '0.3';
-      els.voiceBtn.title = 'Búsqueda por voz no disponible en este navegador';
-    }
-  }, 500);
-}
-
-// ─── UI State Helpers ─────────────────────────────────────────────────────────
-
-function hideAll() {
-  els.loadingState.classList.add('hidden');
-  els.errorState.classList.add('hidden');
-  els.emptyState.classList.add('hidden');
-  els.resultsSection.classList.add('hidden');
-}
-
-function showLoading() {
-  hideAll();
-  els.loadingState.classList.remove('hidden');
-}
-
-function showError(msg) {
-  hideAll();
-  els.errorMsg.textContent = msg;
-  els.errorState.classList.remove('hidden');
-  els.retryBtn.addEventListener('click', loadResults, { once: true });
-}
-
-function showEmpty() {
-  hideAll();
-  els.emptyQuery.textContent = STATE.query;
-  els.emptyState.classList.remove('hidden');
-}
-
-// ─── Format Utilities ─────────────────────────────────────────────────────────
-
-function formatDate(iso) {
-  if (!iso) return 'Hoy';
-  try {
-    const [y, m, d] = iso.split('-').map(Number);
-    const date = new Date(y, m - 1, d);
-    const today = new Date();
-    const isToday = date.toDateString() === today.toDateString();
-    if (isToday) return 'Hoy';
-    return date.toLocaleDateString('es-CO', { weekday: 'long', day: 'numeric', month: 'long' });
-  } catch (_) {
-    return iso;
+  if (!voice.isSupported()) {
+    E.voiceBtn.style.opacity = '0.35';
+    E.voiceBtn.title = 'Búsqueda por voz no disponible (usa Chrome o Edge)';
   }
 }
 
-function formatPrize(value) {
-  if (!value) return '';
-  const num = typeof value === 'string' ? parseFloat(value.replace(/[^\d.]/g, '')) : value;
-  if (isNaN(num)) return String(value);
-  if (num >= 1_000_000_000) return `$${(num / 1_000_000_000).toFixed(1)} mil millones`;
-  if (num >= 1_000_000)     return `$${(num / 1_000_000).toFixed(0)} millones`;
-  if (num >= 1_000)         return `$${(num / 1_000).toFixed(0)} mil`;
-  return `$${num.toLocaleString('es-CO')}`;
+// ── UI helpers ────────────────────────────────────────────────────────────────
+function hideAll() {
+  [E.loadingState, E.errorState, E.emptyState, E.resultsSection].forEach(el => el.classList.add('hidden'));
+}
+function showLoading() { hideAll(); E.loadingState.classList.remove('hidden'); }
+function showError(msg) {
+  hideAll();
+  E.errorMsg.textContent = msg;
+  E.errorState.classList.remove('hidden');
+  E.retryBtn.onclick = () => loadAllResults();
+}
+function showEmpty() {
+  hideAll();
+  E.emptyQuery.textContent = STATE.query;
+  E.emptyState.classList.remove('hidden');
 }
 
-function capitalize(str) {
-  return str.charAt(0).toUpperCase() + str.slice(1);
+// ── Format ────────────────────────────────────────────────────────────────────
+function fmtDate(iso) {
+  if (!iso) return 'Hoy';
+  try {
+    const [y,m,d] = iso.split('-').map(Number);
+    const date = new Date(y, m-1, d);
+    const today = new Date();
+    if (date.toDateString() === today.toDateString()) return 'Hoy';
+    return date.toLocaleDateString('es-CO', { weekday:'short', day:'numeric', month:'short' });
+  } catch(_) { return iso; }
 }
+
+function fmtPrize(v) {
+  if (!v) return '';
+  const n = typeof v === 'string' ? parseFloat(v.replace(/[^\d.]/g,'')) : Number(v);
+  if (isNaN(n)) return String(v);
+  if (n >= 1e9) return `$${(n/1e9).toFixed(1)} mil millones`;
+  if (n >= 1e6) return `$${(n/1e6).toFixed(0)} millones`;
+  if (n >= 1e3) return `$${(n/1e3).toFixed(0)} mil`;
+  return `$${n.toLocaleString('es-CO')}`;
+}
+
+function cap(str) { return str.charAt(0).toUpperCase() + str.slice(1); }

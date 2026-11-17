@@ -1,166 +1,100 @@
 /**
- * voice.js
- * Smart voice search with the Web Speech API.
- * Features:
- *  - Continuous listening with phrase detection
- *  - Multi-language support (es-CO primary, es-ES fallback)
- *  - Synonym / alias normalization via data.js VOICE_ALIASES
- *  - Visual feedback states (idle → listening → processing → result)
- *  - Graceful degradation when mic is unavailable
+ * voice.js — Motor de búsqueda por voz
+ * Web Speech API · es-CO · múltiples alternativas · normalización inteligente
  */
-
 class VoiceSearch {
   constructor({ onResult, onStateChange, onError }) {
     this.onResult = onResult;
     this.onStateChange = onStateChange;
     this.onError = onError;
-
     this.recognition = null;
     this.listening = false;
     this.supported = false;
-    this.interimText = '';
-    this.finalText = '';
-    this.restartTimeout = null;
-
     this._init();
   }
 
   _init() {
-    const SpeechRecognition =
-      window.SpeechRecognition || window.webkitSpeechRecognition;
-
-    if (!SpeechRecognition) {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) {
       this.supported = false;
-      this.onError('Tu navegador no soporta búsqueda por voz. Usa Chrome o Edge.');
       return;
     }
     this.supported = true;
-
-    const r = new SpeechRecognition();
+    const r = new SR();
     r.lang = 'es-CO';
     r.continuous = false;
     r.interimResults = true;
     r.maxAlternatives = 5;
 
-    r.onstart = () => {
-      this.listening = true;
-      this.interimText = '';
-      this.finalText = '';
-      this.onStateChange('listening', '🎙️ Te escucho... habla ahora');
-    };
+    r.onstart  = () => { this.listening = true; this.onStateChange('listening', '🎙️ Escuchando...'); };
+    r.onspeechstart = () => this.onStateChange('speech', '🗣️ Detecté tu voz...');
 
-    r.onresult = (event) => {
-      let interim = '';
-      let final = '';
-
-      for (let i = event.resultIndex; i < event.results.length; i++) {
-        const result = event.results[i];
-        if (result.isFinal) {
-          // Pick the best alternative based on confidence or first
-          let best = result[0].transcript;
-          let bestConf = result[0].confidence;
-          for (let j = 1; j < result.length; j++) {
-            if (result[j].confidence > bestConf) {
-              best = result[j].transcript;
-              bestConf = result[j].confidence;
-            }
+    r.onresult = (e) => {
+      let interim = '', final = '';
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        const res = e.results[i];
+        if (res.isFinal) {
+          // Tomar el mejor alternativo con mayor confianza
+          let best = res[0].transcript, bestConf = res[0].confidence;
+          for (let j = 1; j < res.length; j++) {
+            if (res[j].confidence > bestConf) { best = res[j].transcript; bestConf = res[j].confidence; }
           }
           final += best;
         } else {
-          interim += result[0].transcript;
+          interim += res[0].transcript;
         }
       }
-
-      this.interimText = interim;
-      if (final) this.finalText += final;
-
-      // Show live interim
-      const displayText = this.finalText + interim;
-      if (displayText) {
-        this.onStateChange('interim', `"${displayText}"`);
-      }
+      const display = final || interim;
+      if (display) this.onStateChange('interim', `"${display}"`);
+      this._finalText = (this._finalText || '') + final;
+      this._interimText = interim;
     };
 
     r.onend = () => {
       this.listening = false;
-      if (this.finalText.trim()) {
-        const normalized = normalizeVoiceQuery(this.finalText.trim());
+      const text = (this._finalText || this._interimText || '').trim();
+      this._finalText = '';
+      this._interimText = '';
+      if (text) {
+        const normalized = normalizeVoiceQuery(text);
         this.onStateChange('done', `✅ Buscando: "${normalized}"`);
-        this.onResult(normalized, this.finalText.trim());
-      } else if (this.interimText.trim()) {
-        // Partial — try with interim
-        const normalized = normalizeVoiceQuery(this.interimText.trim());
-        this.onStateChange('done', `✅ Buscando: "${normalized}"`);
-        this.onResult(normalized, this.interimText.trim());
+        this.onResult(normalized, text);
+        setTimeout(() => this.onStateChange('idle', ''), 3000);
       } else {
         this.onStateChange('idle', '');
       }
     };
 
-    r.onerror = (event) => {
+    r.onerror = (e) => {
       this.listening = false;
-      const messages = {
-        'no-speech':          '🔇 No escuché nada. Intenta de nuevo.',
-        'audio-capture':      '🎙️ No se encontró micrófono.',
-        'not-allowed':        '🚫 Permiso de micrófono denegado. Actívalo en la configuración del navegador.',
-        'network':            '🌐 Error de red en el reconocimiento.',
-        'aborted':            '',
-        'service-not-allowed':'🚫 Servicio de voz no disponible.',
+      this._finalText = '';
+      this._interimText = '';
+      const msgs = {
+        'no-speech':     '🔇 No escuché nada. Presiona el micrófono e intenta de nuevo.',
+        'audio-capture': '🎤 No se encontró micrófono.',
+        'not-allowed':   '🚫 Permiso de micrófono denegado. Actívalo en la barra del navegador.',
+        'network':       '🌐 Error de red en el reconocimiento de voz.',
+        'aborted':       '',
       };
-      const msg = messages[event.error] || `Error: ${event.error}`;
-      if (msg) this.onStateChange('error', msg);
-      else this.onStateChange('idle', '');
-    };
-
-    r.onnomatch = () => {
-      this.listening = false;
-      this.onStateChange('error', '🤔 No entendí. Intenta hablar más claro.');
-    };
-
-    r.onsoundstart = () => {
-      this.onStateChange('sound', '🎤 Detectando audio...');
-    };
-
-    r.onspeechstart = () => {
-      this.onStateChange('speech', '🗣️ Escuchando...');
+      const msg = msgs[e.error] ?? `Error de voz: ${e.error}`;
+      this.onStateChange(msg ? 'error' : 'idle', msg);
+      if (msg) setTimeout(() => this.onStateChange('idle', ''), 4000);
     };
 
     this.recognition = r;
   }
 
   toggle() {
-    if (!this.supported) {
-      this.onError('Búsqueda por voz no disponible en este navegador.');
-      return false;
-    }
-    if (this.listening) {
-      this.stop();
-    } else {
-      this.start();
-    }
-    return true;
-  }
-
-  start() {
-    if (!this.supported || this.listening) return;
-    try {
-      this.recognition.start();
-    } catch (e) {
-      // Already started — stop and restart
-      try { this.recognition.stop(); } catch (_) {}
-      clearTimeout(this.restartTimeout);
-      this.restartTimeout = setTimeout(() => {
-        try { this.recognition.start(); } catch (_) {}
-      }, 300);
+    if (!this.supported) { this.onError('Tu navegador no soporta búsqueda por voz. Usa Chrome o Edge.'); return; }
+    if (this.listening) { try { this.recognition.stop(); } catch(_){} }
+    else {
+      this._finalText = '';
+      this._interimText = '';
+      try { this.recognition.start(); }
+      catch (_) { setTimeout(() => { try { this.recognition.start(); } catch(_){} }, 400); }
     }
   }
 
-  stop() {
-    if (!this.supported) return;
-    try { this.recognition.stop(); } catch (_) {}
-    this.listening = false;
-  }
-
-  isListening() { return this.listening; }
   isSupported() { return this.supported; }
+  isListening() { return this.listening; }
 }

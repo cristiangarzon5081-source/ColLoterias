@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ColLoterias — Resultados en Tiempo Real</title>
+  <meta name="description" content="Resultados de loterías colombianas, chances y Baloto en tiempo real. Busca por texto o voz." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=Poppins:wght@700;800;900&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="src/styles.css" />
+</head>
+<body>
+  <div id="app">
+
+    <!-- HEADER -->
+    <header class="header">
+      <div class="header-inner">
+        <div class="logo">
+          <span class="logo-icon">🎱</span>
+          <span class="logo-text">Col<span class="logo-accent">Loterias</span></span>
+        </div>
+        <div class="header-badge">
+          <span class="live-dot"></span>
+          Resultados en vivo
+        </div>
+      </div>
+    </header>
+
+    <!-- HERO -->
+    <section class="hero">
+      <h1 class="hero-title">Consulta tus <span class="gradient-text">números ganadores</span></h1>
+      <p class="hero-sub">Loterías colombianas · Chances · Baloto · Resultados actualizados</p>
+
+      <!-- SEARCH BAR -->
+      <div class="search-container">
+        <div class="search-box" id="searchBox">
+          <span class="search-icon">🔍</span>
+          <input
+            type="text"
+            id="searchInput"
+            placeholder="Busca: Baloto, Bogotá, Chance, Medellín..."
+            autocomplete="off"
+            aria-label="Buscar lotería"
+          />
+          <button class="voice-btn" id="voiceBtn" title="Buscar por voz" aria-label="Buscar por voz">
+            <span class="mic-icon" id="micIcon">🎙️</span>
+          </button>
+          <button class="clear-btn" id="clearBtn" aria-label="Limpiar búsqueda">✕</button>
+        </div>
+        <div class="voice-status" id="voiceStatus"></div>
+        <div class="search-suggestions" id="searchSuggestions"></div>
+      </div>
+
+      <!-- QUICK FILTERS -->
+      <div class="quick-filters" id="quickFilters">
+        <button class="filter-chip active" data-filter="all">Todos</button>
+        <button class="filter-chip" data-filter="loteria">Loterías</button>
+        <button class="filter-chip" data-filter="chance">Chances</button>
+        <button class="filter-chip" data-filter="baloto">Baloto</button>
+        <button class="filter-chip" data-filter="hoy">Hoy</button>
+      </div>
+    </section>
+
+    <!-- MAIN CONTENT -->
+    <main class="main-content">
+
+      <!-- LOADING -->
+      <div class="loading-state" id="loadingState">
+        <div class="spinner"></div>
+        <p>Cargando resultados...</p>
+      </div>
+
+      <!-- ERROR -->
+      <div class="error-state hidden" id="errorState">
+        <span>⚠️</span>
+        <p id="errorMsg">No se pudieron cargar los resultados.</p>
+        <button class="btn-retry" id="retryBtn">Reintentar</button>
+      </div>
+
+      <!-- EMPTY STATE -->
+      <div class="empty-state hidden" id="emptyState">
+        <span class="empty-icon">🔍</span>
+        <h3>Sin resultados para "<span id="emptyQuery"></span>"</h3>
+        <p>Intenta con: Baloto, Bogotá, Chance, Boyacá, Medellín...</p>
+      </div>
+
+      <!-- RESULTS GRID -->
+      <div class="results-section hidden" id="resultsSection">
+        <div class="results-header">
+          <h2 id="resultsTitle">Resultados del día</h2>
+          <span class="results-count" id="resultsCount"></span>
+          <span class="last-update" id="lastUpdate"></span>
+        </div>
+        <div class="cards-grid" id="cardsGrid"></div>
+      </div>
+
+    </main>
+
+    <!-- FOOTER -->
+    <footer class="footer">
+      <p>Fuente oficial: <a href="https://www.coljuegos.gov.co" target="_blank" rel="noopener">Coljuegos</a> · <a href="https://www.baloto.com" target="_blank" rel="noopener">Baloto.com</a></p>
+      <p class="footer-disclaimer">Los resultados son informativos. Verifique siempre en la fuente oficial.</p>
+    </footer>
+
+  </div>
+
+  <!-- MODAL DETAIL -->
+  <div class="modal-overlay hidden" id="modalOverlay">
+    <div class="modal" id="modal">
+      <button class="modal-close" id="modalClose">✕</button>
+      <div id="modalContent"></div>
+    </div>
+  </div>
+
+  <script src="src/data.js"></script>
+  <script src="src/api.js"></script>
+  <script src="src/voice.js"></script>
+  <script src="src/app.js"></script>
+</body>
+</html>

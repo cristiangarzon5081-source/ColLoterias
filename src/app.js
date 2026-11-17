@@ -1,47 +1,48 @@
 /**
  * app.js — Controlador principal
+ * Incluye: búsqueda por texto+fecha, historial en modal con pestañas
  */
 
 // ── Estado global ─────────────────────────────────────────────────────────────
 const STATE = {
-  all: [],          // todos los resultados cargados
-  filtered: [],     // resultados actuales visibles
+  all: [],
+  filtered: [],
   activeFilter: 'all',
   query: '',
   loading: false,
-  loadStats: null,  // { withResults, total, errors, source }
+  loadStats: null,
 };
 
 // ── DOM ───────────────────────────────────────────────────────────────────────
-const $ = id => document.getElementById(id);
+const $  = id => document.getElementById(id);
 const E = {
-  searchInput:   $('searchInput'),
-  searchBox:     $('searchBox'),
-  voiceBtn:      $('voiceBtn'),
-  micIcon:       $('micIcon'),
-  clearBtn:      $('clearBtn'),
-  voiceStatus:   $('voiceStatus'),
-  suggestions:   $('searchSuggestions'),
-  filters:       $('quickFilters'),
-  loadingState:  $('loadingState'),
-  loadingMsg:    $('loadingMsg'),
-  loadingSub:    $('loadingSub'),
-  errorState:    $('errorState'),
-  errorMsg:      $('errorMsg'),
-  retryBtn:      $('retryBtn'),
-  emptyState:    $('emptyState'),
-  emptyQuery:    $('emptyQuery'),
-  resultsSection:$('resultsSection'),
-  resultsTitle:  $('resultsTitle'),
-  resultsCount:  $('resultsCount'),
-  lastUpdate:    $('lastUpdate'),
-  apiNotice:     $('apiNotice'),
-  cardsGrid:     $('cardsGrid'),
-  sourceBadge:   $('sourceBadge'),
-  refreshBtn:    $('refreshBtn'),
-  modalOverlay:  $('modalOverlay'),
-  modalClose:    $('modalClose'),
-  modalContent:  $('modalContent'),
+  searchInput:    $('searchInput'),
+  searchBox:      $('searchBox'),
+  voiceBtn:       $('voiceBtn'),
+  micIcon:        $('micIcon'),
+  clearBtn:       $('clearBtn'),
+  voiceStatus:    $('voiceStatus'),
+  suggestions:    $('searchSuggestions'),
+  filters:        $('quickFilters'),
+  loadingState:   $('loadingState'),
+  loadingMsg:     $('loadingMsg'),
+  loadingSub:     $('loadingSub'),
+  errorState:     $('errorState'),
+  errorMsg:       $('errorMsg'),
+  retryBtn:       $('retryBtn'),
+  emptyState:     $('emptyState'),
+  emptyQuery:     $('emptyQuery'),
+  resultsSection: $('resultsSection'),
+  resultsTitle:   $('resultsTitle'),
+  resultsCount:   $('resultsCount'),
+  lastUpdate:     $('lastUpdate'),
+  apiNotice:      $('apiNotice'),
+  cardsGrid:      $('cardsGrid'),
+  sourceBadge:    $('sourceBadge'),
+  refreshBtn:     $('refreshBtn'),
+  modalOverlay:   $('modalOverlay'),
+  modalClose:     $('modalClose'),
+  modalContent:   $('modalContent'),
 };
 
 // ── Init ──────────────────────────────────────────────────────────────────────
@@ -54,80 +55,60 @@ document.addEventListener('DOMContentLoaded', () => {
   loadAllResults();
 });
 
-// ── Carga de datos ────────────────────────────────────────────────────────────
+// ── Carga principal ───────────────────────────────────────────────────────────
 async function loadAllResults() {
   if (STATE.loading) return;
   STATE.loading = true;
   showLoading();
-
   try {
-    const { results, withResults, total, errors, apiAvailable, source } =
-      await fetchAllResults((msg, sub) => {
-        E.loadingMsg.textContent = msg;
-        E.loadingSub.textContent = sub || '';
-      });
-
-    STATE.all = results;
-    STATE.loadStats = { withResults, total, errors, apiAvailable, source };
+    const stats = await fetchAllResults((msg, sub) => {
+      E.loadingMsg.textContent = msg;
+      E.loadingSub.textContent = sub || '';
+    });
+    STATE.all = stats.results;
+    STATE.loadStats = stats;
     applyFilters();
     renderAll();
-    updateHeaderBadge(source, withResults, total);
-
+    E.sourceBadge.innerHTML = `<span class="live-dot"></span> ${stats.withResults}/${stats.total} resultados`;
+    const t = new Date().toLocaleTimeString('es-CO', { hour: '2-digit', minute: '2-digit' });
+    E.lastUpdate.textContent = `${t} · ${stats.source}`;
   } catch (err) {
     showError('No se pudieron cargar los resultados. ' + (err.message || ''));
-    console.error(err);
   } finally {
     STATE.loading = false;
   }
 }
 
-function updateHeaderBadge(source, withResults, total) {
-  E.sourceBadge.innerHTML = `<span class="live-dot"></span> ${withResults}/${total} resultados`;
-  const now = new Date();
-  const t = now.toLocaleTimeString('es-CO', { hour: '2-digit', minute: '2-digit' });
-  E.lastUpdate.textContent = `Actualizado ${t} · ${source}`;
-}
-
-// ── Filtrado ──────────────────────────────────────────────────────────────────
+// ── Filtros ───────────────────────────────────────────────────────────────────
 function applyFilters() {
   let list = [...STATE.all];
-
-  if (STATE.activeFilter !== 'all') {
-    list = list.filter(r => r.type === STATE.activeFilter);
-  }
-
+  if (STATE.activeFilter !== 'all') list = list.filter(r => r.type === STATE.activeFilter);
   if (STATE.query.trim()) {
-    const q = removeDiacritics(STATE.query.toLowerCase().trim());
-    list = list.filter(r =>
+    // Detectar si la query tiene fecha
+    const parsed = parseQueryWithDate(STATE.query);
+    const q = removeDiacritics(parsed.name.toLowerCase().trim());
+    if (q) list = list.filter(r =>
       removeDiacritics(r.name.toLowerCase()).includes(q) ||
-      removeDiacritics((r.shortName||'').toLowerCase()).includes(q) ||
-      r.id.includes(q.replace(/\s+/g,'-')) ||
+      removeDiacritics((r.shortName || '').toLowerCase()).includes(q) ||
+      r.id.includes(q.replace(/\s+/g, '-')) ||
       r.type.includes(q)
     );
   }
-
-  // Ordenar: baloto primero, con resultados antes de pendientes, luego alfab.
   list.sort((a, b) => {
-    const typeOrder = { baloto: 0, loteria: 1, chance: 2 };
-    if (typeOrder[a.type] !== typeOrder[b.type]) return typeOrder[a.type] - typeOrder[b.type];
+    const to = { baloto: 0, loteria: 1, chance: 2 };
+    if (to[a.type] !== to[b.type]) return to[a.type] - to[b.type];
     if (a.hasResult !== b.hasResult) return a.hasResult ? -1 : 1;
     return a.name.localeCompare(b.name, 'es');
   });
-
   STATE.filtered = list;
 }
 
 // ── Render ────────────────────────────────────────────────────────────────────
 function renderAll() {
-  if (STATE.filtered.length === 0 && STATE.query.trim()) {
-    showEmpty();
-    return;
-  }
-
+  if (STATE.filtered.length === 0 && STATE.query.trim()) { showEmpty(); return; }
   hideAll();
   E.resultsSection.classList.remove('hidden');
 
-  // Título
   if (STATE.query) {
     E.resultsTitle.textContent = `Resultados para "${STATE.query}"`;
   } else if (STATE.activeFilter !== 'all') {
@@ -135,21 +116,14 @@ function renderAll() {
     E.resultsTitle.textContent = labels[STATE.activeFilter] || 'Resultados';
   } else {
     const day = new Date().toLocaleDateString('es-CO', { weekday: 'long', day: 'numeric', month: 'long' });
-    E.resultsTitle.textContent = `${cap(day)}`;
+    E.resultsTitle.textContent = cap(day);
   }
 
   const withRes = STATE.filtered.filter(r => r.hasResult).length;
   const pending = STATE.filtered.length - withRes;
   E.resultsCount.textContent = `${withRes} con resultado${pending > 0 ? ` · ${pending} pendientes` : ''}`;
-
-  // Aviso si hay loterías pendientes
-  if (STATE.loadStats && !STATE.loadStats.apiAvailable) {
-    E.apiNotice.classList.remove('hidden');
-    E.apiNotice.innerHTML = `⚠️ La API principal no respondió. Se usó fuente alternativa.
-      <a href="https://api-resultadosloterias.com" target="_blank" rel="noopener">Más info</a>`;
-  } else {
-    E.apiNotice.classList.add('hidden');
-  }
+  E.apiNotice.classList.toggle('hidden', !STATE.loadStats || STATE.loadStats.apiAvailable);
+  if (!STATE.loadStats?.apiAvailable) E.apiNotice.innerHTML = `⚠️ Fuente alternativa activa. <a href="https://api-resultadosloterias.com" target="_blank">api-resultadosloterias.com</a>`;
 
   E.cardsGrid.innerHTML = '';
   STATE.filtered.forEach(r => E.cardsGrid.appendChild(createCard(r)));
@@ -157,55 +131,44 @@ function renderAll() {
 
 function createCard(r) {
   const div = document.createElement('div');
-  const isSpecial = r.type === 'baloto' && r.id === 'baloto';
-  div.className = 'lottery-card' + (isSpecial ? ' card-baloto' : '');
+  div.className = 'lottery-card' + (r.type === 'baloto' && r.id === 'baloto' ? ' card-baloto' : '');
   div.setAttribute('role', 'button');
   div.setAttribute('tabindex', '0');
   div.setAttribute('aria-label', r.name);
 
-  const badgeCls = { loteria: 'badge-loteria', chance: 'badge-chance', baloto: 'badge-baloto' }[r.type];
+  const badgeCls = { loteria: 'badge-loteria', chance: 'badge-chance', baloto: 'badge-baloto' }[r.type] || 'badge-loteria';
   const typeLabel = { loteria: 'Lotería', chance: 'Chance', baloto: 'Baloto' }[r.type] || r.type;
 
-  // Números
   let numsHtml = '';
   if (r.hasResult && r.numbers.length > 0) {
-    numsHtml = `<div class="card-numbers">`;
-    r.numbers.forEach((n, i) => {
-      const isSuperball = r.type === 'baloto' && i === r.numbers.length - 1 && r.superball != null;
-      const cls = isSuperball ? 'num-ball superball' : `num-ball nb-${r.type}`;
-      numsHtml += `<span class="${cls}">${n}</span>`;
-    });
-    if (r.sign) numsHtml += `<span class="sign-badge">${r.sign}</span>`;
-    numsHtml += `</div>`;
-  } else if (r.pending || !r.hasResult) {
-    const now = new Date();
-    const [hh, mm] = (r.hour || '').split(':').map(Number);
-    const sorteoTime = new Date(); sorteoTime.setHours(hh||22, mm||0, 0, 0);
-    const upcoming = sorteoTime > now;
-    numsHtml = `<div class="card-numbers pending">
-      <span class="pending-label">${upcoming ? `⏰ Sorteo a las ${r.hour}` : '⌛ Resultado no disponible aún'}</span>
-    </div>`;
-  }
-
-  // Info chips
-  let infoHtml = '';
-  const chips = [];
-  if (r.sorteo)   chips.push({ label: 'Sorteo', value: `#${r.sorteo}` });
-  if (r.serie)    chips.push({ label: 'Serie', value: r.serie });
-  if (r.fraccion) chips.push({ label: 'Fracción', value: r.fraccion });
-  if (r.prize)    chips.push({ label: 'Premio', value: fmtPrize(r.prize), prize: true });
-  if (r.jackpot && r.type === 'baloto') chips.push({ label: 'Acumulado', value: fmtPrize(r.jackpot), prize: true });
-  if (chips.length) {
-    infoHtml = `<div class="card-info">` +
-      chips.map(c => `<div class="info-chip"><span class="chip-lbl">${c.label}</span><span class="chip-val${c.prize?' prize':''}">${c.value}</span></div>`).join('') +
+    numsHtml = `<div class="card-numbers">` +
+      r.numbers.map((n, i) => {
+        const isSB = r.type === 'baloto' && i === r.numbers.length - 1 && r.superball != null;
+        return `<span class="num-ball ${isSB ? 'superball' : 'nb-' + r.type}">${n}</span>`;
+      }).join('') +
+      (r.sign ? `<span class="sign-badge">${r.sign}</span>` : '') +
       `</div>`;
+  } else {
+    const [hh = 22, mm = 0] = (r.hour || '22:00').split(':').map(Number);
+    const st = new Date(); st.setHours(hh, mm, 0, 0);
+    const upcoming = st > new Date();
+    numsHtml = `<div class="card-numbers pending"><span class="pending-label">${upcoming ? `⏰ Sorteo a las ${r.hour}` : '⌛ Resultado pendiente'}</span></div>`;
   }
 
-  // Baloto acumulado banner
-  let banner = '';
-  if (r.type === 'baloto' && r.jackpot) {
-    banner = `<div class="baloto-banner"><span class="bb-label">Acumulado</span><span class="bb-amount">${fmtPrize(r.jackpot)}</span></div>`;
-  }
+  const chips = [
+    r.sorteo   && { label: 'Sorteo', value: `#${r.sorteo}` },
+    r.serie    && { label: 'Serie', value: r.serie },
+    r.fraccion && { label: 'Fracción', value: r.fraccion },
+    r.prize    && { label: 'Premio', value: fmtPrize(r.prize), prize: true },
+    (r.jackpot && r.type === 'baloto') && { label: 'Acumulado', value: fmtPrize(r.jackpot), prize: true },
+  ].filter(Boolean);
+
+  const infoHtml = chips.length ? `<div class="card-info">${chips.map(c =>
+    `<div class="info-chip"><span class="chip-lbl">${c.label}</span><span class="chip-val${c.prize ? ' prize' : ''}">${c.value}</span></div>`
+  ).join('')}</div>` : '';
+
+  const banner = (r.type === 'baloto' && r.jackpot)
+    ? `<div class="baloto-banner"><span class="bb-label">Acumulado</span><span class="bb-amount">${fmtPrize(r.jackpot)}</span></div>` : '';
 
   div.innerHTML = `
     <div class="card-status-dot ${r.hasResult ? 'has-result' : 'pending'}"></div>
@@ -217,63 +180,205 @@ function createCard(r) {
       </div>
       <span class="card-badge ${badgeCls}">${typeLabel}</span>
     </div>
-    ${banner}
-    ${numsHtml}
-    ${infoHtml}
-  `;
+    ${banner}${numsHtml}${infoHtml}
+    <div class="card-history-hint">📅 Ver historial →</div>`;
 
-  div.addEventListener('click',   () => openModal(r));
-  div.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') openModal(r); });
+  div.addEventListener('click',   () => openDetailPanel(r));
+  div.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') openDetailPanel(r); });
   return div;
 }
 
-// ── Modal ─────────────────────────────────────────────────────────────────────
-function openModal(r) {
+// ── PANEL DE DETALLE CON HISTORIAL ────────────────────────────────────────────
+
+async function openDetailPanel(r) {
+  const cat = findInCatalog(r.id) || findInCatalog(r.apiSlug);
   const typeLabel = { loteria: 'Lotería', chance: 'Chance', baloto: 'Baloto' }[r.type] || r.type;
 
+  // Renderizar panel inicial con el último resultado
+  E.modalContent.innerHTML = renderDetailHeader(r, typeLabel) +
+    `<div class="modal-tabs">
+      <button class="tab-btn active" data-tab="last">Último sorteo</button>
+      <button class="tab-btn" data-tab="history">📅 Historial</button>
+    </div>
+    <div id="tabLast">${renderResultDetail(r)}</div>
+    <div id="tabHistory" class="hidden">
+      <div class="history-loading"><div class="spinner-sm"></div> Cargando historial...</div>
+    </div>`;
+
+  E.modalOverlay.classList.remove('hidden');
+  document.body.style.overflow = 'hidden';
+
+  // Tabs
+  E.modalContent.querySelectorAll('.tab-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      E.modalContent.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      const tab = btn.dataset.tab;
+      $('tabLast').classList.toggle('hidden', tab !== 'last');
+      $('tabHistory').classList.toggle('hidden', tab !== 'history');
+
+      // Cargar historial la primera vez que se abre esa pestaña
+      if (tab === 'history' && $('tabHistory').querySelector('.history-loading') && cat) {
+        try {
+          const history = await fetchHistory(cat);
+          $('tabHistory').innerHTML = renderHistoryTab(history, cat);
+        } catch (e) {
+          $('tabHistory').innerHTML = `<div class="history-error">No se pudo cargar el historial.<br><a href="${cat.official || '#'}" target="_blank">Ver en fuente oficial →</a></div>`;
+        }
+      }
+    });
+  });
+}
+
+function renderDetailHeader(r, typeLabel) {
+  return `
+    <div class="modal-header-row">
+      <span class="modal-emoji">${r.emoji}</span>
+      <div>
+        <h2 class="modal-title">${r.name}</h2>
+        <p class="modal-subtitle">${typeLabel} · ${r.entity || ''}</p>
+      </div>
+    </div>`;
+}
+
+function renderResultDetail(r) {
   let numsHtml = '';
   if (r.hasResult && r.numbers.length > 0) {
-    numsHtml = `<div class="modal-numbers">`;
-    r.numbers.forEach((n, i) => {
-      const isSuperball = r.type === 'baloto' && i === r.numbers.length - 1 && r.superball != null;
-      const cls = isSuperball ? 'modal-ball superball' : `modal-ball nb-${r.type}`;
-      numsHtml += `<span class="${cls}">${n}</span>`;
-    });
-    if (r.sign) numsHtml += `<span class="modal-sign">${r.sign}</span>`;
-    numsHtml += `</div>`;
+    numsHtml = `<div class="modal-numbers">` +
+      r.numbers.map((n, i) => {
+        const isSB = r.type === 'baloto' && i === r.numbers.length - 1 && r.superball != null;
+        return `<span class="modal-ball ${isSB ? 'superball' : 'nb-' + r.type}">${n}</span>`;
+      }).join('') +
+      (r.sign ? `<span class="modal-sign">${r.sign}</span>` : '') +
+      `</div>`;
   } else {
-    numsHtml = `<div class="modal-no-result">⏰ El resultado aún no está disponible.<br>Sorteo: ${r.hour || 'Ver fuente oficial'}</div>`;
+    numsHtml = `<div class="modal-no-result">⏰ Resultado no disponible. Sorteo: ${r.hour || '—'}</div>`;
   }
 
   const details = [
     r.sorteo   && { label: 'Sorteo', value: `#${r.sorteo}` },
+    r.date     && { label: 'Fecha', value: fmtDateLong(r.date) },
     r.serie    && { label: 'Serie', value: r.serie },
     r.fraccion && { label: 'Fracción', value: r.fraccion },
     r.prize    && { label: 'Premio Mayor', value: fmtPrize(r.prize), prize: true },
-    r.jackpot  && { label: 'Acumulado Baloto', value: fmtPrize(r.jackpot), prize: true },
-    r.entity   && { label: 'Entidad', value: r.entity },
-    r.source   && { label: 'Fuente de datos', value: r.source },
+    r.jackpot  && { label: 'Acumulado', value: fmtPrize(r.jackpot), prize: true },
+    r.source   && { label: 'Fuente', value: r.source },
   ].filter(Boolean);
 
-  E.modalContent.innerHTML = `
-    <div class="modal-emoji">${r.emoji}</div>
-    <h2 class="modal-title">${r.name}</h2>
-    <p class="modal-subtitle">${typeLabel} · ${fmtDate(r.date)}</p>
-    ${numsHtml}
-    ${details.length ? `<div class="modal-grid">${details.map(d=>`
-      <div class="modal-box">
-        <div class="modal-box-label">${d.label}</div>
-        <div class="modal-box-value${d.prize?' prize':''}">${d.value}</div>
-      </div>`).join('')}</div>` : ''}
-    <a class="modal-official-link" href="${r.official}" target="_blank" rel="noopener">
-      🔗 Ver en fuente oficial
-    </a>
-  `;
+  const grid = details.length ? `<div class="modal-grid">${details.map(d =>
+    `<div class="modal-box"><div class="modal-box-label">${d.label}</div>
+     <div class="modal-box-value${d.prize ? ' prize' : ''}">${d.value}</div></div>`
+  ).join('')}</div>` : '';
 
-  E.modalOverlay.classList.remove('hidden');
-  document.body.style.overflow = 'hidden';
+  return `${numsHtml}${grid}
+    <a class="modal-official-link" href="${r.official}" target="_blank" rel="noopener">🔗 Ver en fuente oficial</a>`;
 }
 
+function renderHistoryTab(history, cat) {
+  if (!history || history.length === 0) {
+    return `<div class="history-empty">
+      No se encontraron resultados anteriores.<br>
+      <a href="${cat.official || '#'}" target="_blank" rel="noopener">Ver historial oficial →</a>
+    </div>`;
+  }
+
+  const rows = history.map(r => {
+    const nums = r.numbers.map(n =>
+      `<span class="hist-ball nb-${r.type}">${n}</span>`
+    ).join('');
+    const serie = r.serie ? `<span class="hist-serie">Serie ${r.serie}</span>` : '';
+    const sorteo = r.sorteo ? `<span class="hist-sorteo">#${r.sorteo}</span>` : '';
+    const prize = r.prize ? `<span class="hist-prize">${fmtPrize(r.prize)}</span>` : '';
+    return `
+      <div class="hist-row">
+        <div class="hist-date-col">
+          <span class="hist-date">${fmtDateLong(r.date)}</span>
+          ${sorteo}
+        </div>
+        <div class="hist-nums-col">${nums}${serie}</div>
+        ${prize ? `<div class="hist-prize-col">${prize}</div>` : ''}
+      </div>`;
+  }).join('');
+
+  return `
+    <div class="history-info">Últimos ${history.length} sorteos · <a href="${cat.official || '#'}" target="_blank">Ver más →</a></div>
+    <div class="hist-list">${rows}</div>`;
+}
+
+// ── Búsqueda avanzada: nombre + fecha ─────────────────────────────────────────
+
+/**
+ * Parsea una query como "medellín 13 de noviembre" o "bogotá 2026-11-05"
+ * Retorna { name: string, date: string|null }
+ */
+function parseQueryWithDate(query) {
+  if (!query) return { name: '', date: null };
+
+  const months = { enero: 1, febrero: 2, marzo: 3, abril: 4, mayo: 5, junio: 6,
+                   julio: 7, agosto: 8, septiembre: 9, octubre: 10, noviembre: 11, diciembre: 12 };
+
+  // "13 de noviembre" or "13 noviembre"
+  const spMatch = query.match(/(\d{1,2})\s+de\s+(\w+)(?:\s+(?:de\s+)?(\d{4}))?/i) ||
+                  query.match(/(\d{1,2})\s+(\w+)(?:\s+(\d{4}))?/i);
+  if (spMatch) {
+    const day = parseInt(spMatch[1]);
+    const mon = months[removeDiacritics(spMatch[2].toLowerCase())];
+    if (mon) {
+      const year = spMatch[3] ? parseInt(spMatch[3]) : new Date().getFullYear();
+      const date = `${year}-${String(mon).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
+      const name = query.replace(spMatch[0], '').trim();
+      return { name, date };
+    }
+  }
+
+  // ISO date: "2026-11-13"
+  const isoMatch = query.match(/(\d{4}-\d{2}-\d{2})/);
+  if (isoMatch) {
+    const name = query.replace(isoMatch[1], '').trim();
+    return { name, date: isoMatch[1] };
+  }
+
+  return { name: query, date: null };
+}
+
+/**
+ * Si el query tiene fecha, busca ese resultado específico y lo muestra primero.
+ */
+async function handleDateQuery(query) {
+  const { name, date } = parseQueryWithDate(query);
+  if (!date || !name) return; // sin fecha o sin nombre de lotería → búsqueda normal
+
+  // Encontrar la lotería en el catálogo
+  const catMatches = searchCatalog(name);
+  if (!catMatches.length) return;
+  const cat = catMatches[0];
+
+  // Mostrar loading en el grid
+  E.cardsGrid.innerHTML = `<div class="date-search-loading"><div class="spinner-sm"></div> Buscando resultado del ${fmtDateLong(date)} para ${cat.name}...</div>`;
+  hideAll();
+  E.resultsSection.classList.remove('hidden');
+  E.resultsTitle.textContent = `${cat.name} · ${fmtDateLong(date)}`;
+  E.resultsCount.textContent = '';
+
+  try {
+    const result = await fetchResultByDate(cat, date);
+    if (result) {
+      E.cardsGrid.innerHTML = '';
+      E.cardsGrid.appendChild(createCard(result));
+      E.resultsCount.textContent = '1 resultado encontrado';
+    } else {
+      E.cardsGrid.innerHTML = `<div class="date-no-result">
+        No se encontró resultado de <strong>${cat.name}</strong> para el <strong>${fmtDateLong(date)}</strong>.<br>
+        <small>Puede que ese día no haya habido sorteo o el resultado no esté disponible.</small>
+      </div>`;
+      E.resultsCount.textContent = '';
+    }
+  } catch (e) {
+    E.cardsGrid.innerHTML = `<div class="date-no-result">Error al buscar: ${e.message}</div>`;
+  }
+}
+
+// ── Modal / panel ─────────────────────────────────────────────────────────────
 function closeModal() {
   E.modalOverlay.classList.add('hidden');
   document.body.style.overflow = '';
@@ -285,7 +390,7 @@ function setupModal() {
   document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
 }
 
-// ── Búsqueda por texto ────────────────────────────────────────────────────────
+// ── Búsqueda ──────────────────────────────────────────────────────────────────
 function setupSearch() {
   let debounce;
   E.searchInput.addEventListener('input', () => {
@@ -293,11 +398,25 @@ function setupSearch() {
     updateClearBtn();
     showSuggestions(STATE.query);
     clearTimeout(debounce);
-    debounce = setTimeout(() => { applyFilters(); renderAll(); }, 220);
+    debounce = setTimeout(() => {
+      const { date } = parseQueryWithDate(STATE.query);
+      if (date && STATE.query.trim().length > 3) {
+        handleDateQuery(STATE.query);
+      } else {
+        applyFilters();
+        renderAll();
+      }
+    }, 350);
   });
 
   E.searchInput.addEventListener('keydown', e => {
-    if (e.key === 'Enter') { e.preventDefault(); hideSuggestions(); applyFilters(); renderAll(); }
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      hideSuggestions();
+      const { date } = parseQueryWithDate(STATE.query);
+      if (date && STATE.query.trim().length > 3) handleDateQuery(STATE.query);
+      else { applyFilters(); renderAll(); }
+    }
     if (e.key === 'ArrowDown') navigateSugg(1);
     if (e.key === 'ArrowUp')   navigateSugg(-1);
     if (e.key === 'Escape')    hideSuggestions();
@@ -322,13 +441,14 @@ let suggIdx = -1;
 
 function showSuggestions(query) {
   if (!query.trim()) { hideSuggestions(); return; }
-  const matches = searchCatalog(query, STATE.activeFilter !== 'all' ? STATE.activeFilter : null).slice(0, 7);
+  const { name } = parseQueryWithDate(query);
+  const matches = searchCatalog(name || query, STATE.activeFilter !== 'all' ? STATE.activeFilter : null).slice(0, 7);
   if (!matches.length) { hideSuggestions(); return; }
   suggIdx = -1;
-  E.suggestions.innerHTML = matches.map((m, i) => `
-    <div class="sugg-item" data-idx="${i}" data-name="${m.name}" role="option">
+  E.suggestions.innerHTML = matches.map(m => `
+    <div class="sugg-item" data-name="${m.name}" role="option">
       <span class="sugg-emoji">${m.emoji}</span>
-      <span class="sugg-name">${hlMatch(m.name, query)}</span>
+      <span class="sugg-name">${hlMatch(m.name, name || query)}</span>
       <span class="sugg-type">${m.type}</span>
     </div>`).join('');
   E.suggestions.classList.add('visible');
@@ -344,10 +464,7 @@ function showSuggestions(query) {
   });
 }
 
-function hideSuggestions() {
-  E.suggestions.classList.remove('visible');
-  suggIdx = -1;
-}
+function hideSuggestions() { E.suggestions.classList.remove('visible'); suggIdx = -1; }
 
 function navigateSugg(dir) {
   const items = E.suggestions.querySelectorAll('.sugg-item');
@@ -361,6 +478,7 @@ function navigateSugg(dir) {
 }
 
 function hlMatch(text, query) {
+  if (!query) return text;
   const q = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   return text.replace(new RegExp(`(${q})`, 'gi'), '<strong>$1</strong>');
 }
@@ -369,7 +487,7 @@ function updateClearBtn() {
   E.clearBtn.classList.toggle('visible', !!STATE.query.trim());
 }
 
-// ── Filtros rápidos ───────────────────────────────────────────────────────────
+// ── Filtros ───────────────────────────────────────────────────────────────────
 function setupFilters() {
   E.filters.addEventListener('click', e => {
     const chip = e.target.closest('.filter-chip');
@@ -393,12 +511,13 @@ function setupVoice() {
       STATE.query = normalized;
       updateClearBtn();
       hideSuggestions();
-      applyFilters();
-      renderAll();
+      const { date } = parseQueryWithDate(normalized);
+      if (date && normalized.trim().length > 3) handleDateQuery(normalized);
+      else { applyFilters(); renderAll(); }
     },
     onStateChange(state, msg) {
       E.voiceStatus.textContent = msg;
-      const active = ['listening','speech','interim','sound'].includes(state);
+      const active = ['listening', 'speech', 'interim', 'sound'].includes(state);
       E.searchBox.classList.toggle('listening', active);
       E.voiceBtn.classList.toggle('active', active);
       E.micIcon.textContent = active ? '🔴' : '🎙️';
@@ -410,14 +529,13 @@ function setupVoice() {
   });
 
   E.voiceBtn.addEventListener('click', () => voice.toggle());
-
   if (!voice.isSupported()) {
     E.voiceBtn.style.opacity = '0.35';
     E.voiceBtn.title = 'Búsqueda por voz no disponible (usa Chrome o Edge)';
   }
 }
 
-// ── UI helpers ────────────────────────────────────────────────────────────────
+// ── UI state ──────────────────────────────────────────────────────────────────
 function hideAll() {
   [E.loadingState, E.errorState, E.emptyState, E.resultsSection].forEach(el => el.classList.add('hidden'));
 }
@@ -438,21 +556,28 @@ function showEmpty() {
 function fmtDate(iso) {
   if (!iso) return 'Hoy';
   try {
-    const [y,m,d] = iso.split('-').map(Number);
-    const date = new Date(y, m-1, d);
-    const today = new Date();
-    if (date.toDateString() === today.toDateString()) return 'Hoy';
-    return date.toLocaleDateString('es-CO', { weekday:'short', day:'numeric', month:'short' });
-  } catch(_) { return iso; }
+    const [y, m, d] = iso.split('-').map(Number);
+    const date = new Date(y, m - 1, d);
+    if (date.toDateString() === new Date().toDateString()) return 'Hoy';
+    return date.toLocaleDateString('es-CO', { weekday: 'short', day: 'numeric', month: 'short' });
+  } catch (_) { return iso; }
+}
+
+function fmtDateLong(iso) {
+  if (!iso) return '—';
+  try {
+    const [y, m, d] = iso.split('-').map(Number);
+    return new Date(y, m - 1, d).toLocaleDateString('es-CO', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+  } catch (_) { return iso; }
 }
 
 function fmtPrize(v) {
   if (!v) return '';
-  const n = typeof v === 'string' ? parseFloat(v.replace(/[^\d.]/g,'')) : Number(v);
+  const n = typeof v === 'string' ? parseFloat(v.replace(/[^\d.]/g, '')) : Number(v);
   if (isNaN(n)) return String(v);
-  if (n >= 1e9) return `$${(n/1e9).toFixed(1)} mil millones`;
-  if (n >= 1e6) return `$${(n/1e6).toFixed(0)} millones`;
-  if (n >= 1e3) return `$${(n/1e3).toFixed(0)} mil`;
+  if (n >= 1e9) return `$${(n / 1e9).toFixed(1)} mil millones`;
+  if (n >= 1e6) return `$${(n / 1e6).toFixed(0)} millones`;
+  if (n >= 1e3) return `$${(n / 1e3).toFixed(0)} mil`;
   return `$${n.toLocaleString('es-CO')}`;
 }
 

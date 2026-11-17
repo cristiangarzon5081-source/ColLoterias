@@ -55,55 +55,121 @@ document.addEventListener('DOMContentLoaded', () => {
   loadAllResults();
 });
 
-// ── Carga principal ───────────────────────────────────────────────────────────
+// ── Carga principal — incremental ─────────────────────────────────────────────
 async function loadAllResults() {
   if (STATE.loading) return;
   STATE.loading = true;
-  showLoading();
+  STATE.all     = [];
+  STATE.loadStats = null;
+
+  // Mostrar sección de resultados de inmediato (vacía)
+  hideAll();
+  E.resultsSection.classList.remove('hidden');
+  E.cardsGrid.innerHTML = '';
+  E.resultsTitle.textContent = cap(new Date().toLocaleDateString('es-CO', { weekday:'long', day:'numeric', month:'long' }));
+  E.resultsCount.textContent = 'Cargando...';
+  E.sourceBadge.innerHTML = `<span class="live-dot"></span> Cargando...`;
+  E.apiNotice.classList.add('hidden');
+
+  // Map para deduplicar — clave: id de lotería
+  const byId = new Map();
+
+  const onCard = (card, isFinal) => {
+    if (!card?.id) return;
+    const existing = byId.get(card.id);
+    // Actualizar solo si: no existe, o existe como pendiente y ahora hay resultado
+    if (!existing || (isFinal && !existing.hasResult && card.hasResult)) {
+      byId.set(card.id, card);
+      // Actualizar STATE.all
+      const idx = STATE.all.findIndex(r => r.id === card.id);
+      if (idx >= 0) STATE.all[idx] = card; else STATE.all.push(card);
+      // Re-render incremental: solo actualizar o insertar esa tarjeta
+      updateCardInGrid(card);
+      updateCounters();
+    }
+  };
+
   try {
-    const stats = await fetchAllResults((msg, sub) => {
-      E.loadingMsg.textContent = msg;
-      E.loadingSub.textContent = sub || '';
+    const stats = await fetchAllResults(onCard, (status) => {
+      E.sourceBadge.innerHTML = `<span class="live-dot"></span> ${status}`;
     });
-    STATE.all       = stats.results;
-    STATE.loadStats = { ...stats, apiAvailable: stats.apiOk };
-    applyFilters();
-    renderAll();
-    E.sourceBadge.innerHTML = `<span class="live-dot"></span> ${stats.withResults}/${stats.total} resultados`;
-    const t = new Date().toLocaleTimeString('es-CO', { hour: '2-digit', minute: '2-digit' });
+    STATE.loadStats = { apiAvailable: stats.apiOk };
+    updateCounters();
+    const t = new Date().toLocaleTimeString('es-CO', { hour:'2-digit', minute:'2-digit' });
     E.lastUpdate.textContent = `${t} · ${stats.source}`;
   } catch (err) {
-    showError('No se pudieron cargar los resultados. ' + (err.message || ''));
+    if (STATE.all.length === 0) showError('No se pudieron cargar los resultados.');
   } finally {
     STATE.loading = false;
   }
 }
 
-// ── Filtros ───────────────────────────────────────────────────────────────────
+function updateCounters() {
+  const withRes = STATE.all.filter(r => r.hasResult).length;
+  const total   = STATE.all.length;
+  const pending = total - withRes;
+  E.sourceBadge.innerHTML = `<span class="live-dot"></span> ${withRes} resultados`;
+  E.resultsCount.textContent = `${withRes} con resultado${pending>0?' · '+pending+' pendientes':''}`;
+}
+
+/** Actualiza o inserta una tarjeta en el grid sin re-renderizar todo */
+function updateCardInGrid(r) {
+  const existing = E.cardsGrid.querySelector(`[data-id="${r.id}"]`);
+  const newCard  = createCard(r);
+  newCard.setAttribute('data-id', r.id);
+
+  if (existing) {
+    // Reemplazar tarjeta existente (actualizar de pendiente a con resultado)
+    E.cardsGrid.replaceChild(newCard, existing);
+  } else {
+    // Insertar en posición correcta según ordenamiento
+    insertCardSorted(newCard, r);
+  }
+}
+
+function insertCardSorted(cardEl, r) {
+  const typeOrder = { baloto:0, loteria:1, chance:2 };
+  const cards = Array.from(E.cardsGrid.children);
+  let inserted = false;
+  for (const existing of cards) {
+    const eId   = existing.getAttribute('data-id');
+    const eData = STATE.all.find(x => x.id === eId);
+    if (!eData) continue;
+    const aOrder = typeOrder[r.type] ?? 3;
+    const bOrder = typeOrder[eData.type] ?? 3;
+    if (aOrder < bOrder || (aOrder === bOrder && r.name.localeCompare(eData.name,'es') < 0)) {
+      E.cardsGrid.insertBefore(cardEl, existing);
+      inserted = true;
+      break;
+    }
+  }
+  if (!inserted) E.cardsGrid.appendChild(cardEl);
+}
+
+// ── Filtros y render completo (usado cuando el usuario filtra/busca) ──────────
 function applyFilters() {
   let list = [...STATE.all];
   if (STATE.activeFilter !== 'all') list = list.filter(r => r.type === STATE.activeFilter);
   if (STATE.query.trim()) {
-    // Detectar si la query tiene fecha
     const parsed = parseQueryWithDate(STATE.query);
     const q = removeDiacritics(parsed.name.toLowerCase().trim());
     if (q) list = list.filter(r =>
       removeDiacritics(r.name.toLowerCase()).includes(q) ||
-      removeDiacritics((r.shortName || '').toLowerCase()).includes(q) ||
-      r.id.includes(q.replace(/\s+/g, '-')) ||
+      removeDiacritics((r.shortName||'').toLowerCase()).includes(q) ||
+      r.id.includes(q.replace(/\s+/g,'-')) ||
       r.type.includes(q)
     );
   }
-  list.sort((a, b) => {
-    const to = { baloto: 0, loteria: 1, chance: 2 };
-    if (to[a.type] !== to[b.type]) return to[a.type] - to[b.type];
-    if (a.hasResult !== b.hasResult) return a.hasResult ? -1 : 1;
-    return a.name.localeCompare(b.name, 'es');
+  list.sort((a,b) => {
+    const to={baloto:0,loteria:1,chance:2};
+    if(to[a.type]!==to[b.type])return to[a.type]-to[b.type];
+    if(a.hasResult!==b.hasResult)return a.hasResult?-1:1;
+    return a.name.localeCompare(b.name,'es');
   });
   STATE.filtered = list;
 }
 
-// ── Render ────────────────────────────────────────────────────────────────────
+// ── Render completo (filtros/búsqueda) ────────────────────────────────────────
 function renderAll() {
   if (STATE.filtered.length === 0 && STATE.query.trim()) { showEmpty(); return; }
   hideAll();
@@ -112,21 +178,22 @@ function renderAll() {
   if (STATE.query) {
     E.resultsTitle.textContent = `Resultados para "${STATE.query}"`;
   } else if (STATE.activeFilter !== 'all') {
-    const labels = { loteria: '🎟️ Loterías', chance: '🎲 Chances', baloto: '🎱 Baloto' };
+    const labels = { loteria:'🎟️ Loterías', chance:'🎲 Chances', baloto:'🎱 Baloto' };
     E.resultsTitle.textContent = labels[STATE.activeFilter] || 'Resultados';
   } else {
-    const day = new Date().toLocaleDateString('es-CO', { weekday: 'long', day: 'numeric', month: 'long' });
-    E.resultsTitle.textContent = cap(day);
+    E.resultsTitle.textContent = cap(new Date().toLocaleDateString('es-CO',{weekday:'long',day:'numeric',month:'long'}));
   }
 
   const withRes = STATE.filtered.filter(r => r.hasResult).length;
   const pending = STATE.filtered.length - withRes;
-  E.resultsCount.textContent = `${withRes} con resultado${pending > 0 ? ` · ${pending} pendientes` : ''}`;
+  E.resultsCount.textContent = `${withRes} con resultado${pending>0?' · '+pending+' pendientes':''}`;
   E.apiNotice.classList.toggle('hidden', !STATE.loadStats || STATE.loadStats.apiAvailable);
-  if (!STATE.loadStats?.apiAvailable) E.apiNotice.innerHTML = `⚠️ Fuente alternativa activa. <a href="https://api-resultadosloterias.com" target="_blank">api-resultadosloterias.com</a>`;
 
   E.cardsGrid.innerHTML = '';
-  STATE.filtered.forEach(r => E.cardsGrid.appendChild(createCard(r)));
+  STATE.filtered.forEach(r => {
+    const c = createCard(r); c.setAttribute('data-id', r.id);
+    E.cardsGrid.appendChild(c);
+  });
 }
 
 function createCard(r) {
@@ -135,6 +202,7 @@ function createCard(r) {
   div.setAttribute('role', 'button');
   div.setAttribute('tabindex', '0');
   div.setAttribute('aria-label', r.name);
+  div.setAttribute('data-id', r.id);
 
   const badgeCls = { loteria: 'badge-loteria', chance: 'badge-chance', baloto: 'badge-baloto' }[r.type] || 'badge-loteria';
   const typeLabel = { loteria: 'Lotería', chance: 'Chance', baloto: 'Baloto' }[r.type] || r.type;
